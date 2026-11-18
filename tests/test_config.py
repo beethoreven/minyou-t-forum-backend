@@ -38,6 +38,16 @@ def test_optional_settings_have_defaults():
     assert config.session_idle_days == 90
 
 
+def test_version_is_the_short_commit_the_host_reports():
+    assert load_config(ENV).version == "local"
+
+    deployed = load_config(ENV | {"RENDER_GIT_COMMIT": "C276936B2168BDE20B6447B303213808B1D766DC"})
+    assert deployed.version == "c276936"
+
+    for not_a_commit in ("", "main", "c27693", "not a commit; echo secret", "g" * 40):
+        assert load_config(ENV | {"RENDER_GIT_COMMIT": not_a_commit}).version == "local"
+
+
 def test_several_origins():
     config = load_config(ENV | {"ALLOWED_ORIGINS": "http://localhost:8180, https://example.github.io ,"})
     assert config.allowed_origins == ("http://localhost:8180", "https://example.github.io")

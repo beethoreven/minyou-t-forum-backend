@@ -181,8 +181,8 @@ def create_app(
 
     @app.get("/health")
     def health():
-        # 不碰資料庫：只回答「服務活著」。
-        return {"status": "ok"}
+        # 不碰資料庫：只回答「服務活著」，以及現在跑的是哪一版。
+        return {"status": "ok", "version": config.version}
 
     # ── 登入 ────────────────────────────────────────────────
 

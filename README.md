@@ -228,7 +228,7 @@ cp .env.example .env
 .venv/bin/python app.py
 ```
 
-服務在 `http://localhost:5180`。資料表會在啟動時自動建好。用瀏覽器打開 `http://localhost:5180/health`，看到 `{"status":"ok"}` 就是起來了。接著照 [`minyou_t_forum-web`](https://github.com/beethoreven/minyou_t_forum-web) 的說明啟動前端。
+服務在 `http://localhost:5180`。資料表會在啟動時自動建好。用瀏覽器打開 `http://localhost:5180/health`，看到 `{"status":"ok","version":"…"}` 就是起來了。接著照 [`minyou_t_forum-web`](https://github.com/beethoreven/minyou_t_forum-web) 的說明啟動前端。
 
 ### 6. 跑測試
 
@@ -267,7 +267,7 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 
 3. **環境變數**：照 Part C 的表填。值的前後不要加引號。
 4. **Google Drive**：在 Google Cloud Console 啟用 Google Drive API、建立服務帳號並下載 JSON 金鑰；把放文件的資料夾分享給服務帳號的 email（結尾是 `.iam.gserviceaccount.com`），權限選「檢視者」。
-5. 部署完成後打開 `https://<你的服務>.onrender.com/health`，看到 `{"status":"ok"}` 就是起來了。設定有錯的話服務起不來，Logs 裡會寫是哪一個設定。
+5. 部署完成後打開 `https://<你的服務>.onrender.com/health`，看到 `{"status":"ok","version":"…"}` 就是起來了。設定有錯的話服務起不來，Logs 裡會寫是哪一個設定。
 6. **把附圖放進 Google Drive（選用）**。不做這一步，附圖存在資料庫，功能完全一樣。想讓圖片出現在文件資料夾底下的 `Pic` 才需要：
    1. 用文件資料夾主人的 Google 帳號打開 `https://script.google.com/home`，建立新專案，把 `tools/apps_script/pictures.gs` 的內容整個貼進去。
    2. 專案設定 → 指令碼屬性，加兩個：`SECRET`（自己取一串夠長的亂碼）、`FOLDER_ID`（跟 `DRIVE_FOLDER_ID` 一樣）。
@@ -297,7 +297,7 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 
 | 方法與路徑 | 誰可以用 | 做什麼 |
 |---|---|---|
-| `GET /health` | 任何人 | 服務是否活著，不碰資料庫 |
+| `GET /health` | 任何人 | 服務是否活著，以及現在跑的是哪一版（git commit 的前七碼；本機是 `local`）。不碰資料庫。推了新版之後看這個值換了沒，就知道部署完成了沒有 |
 | `POST /auth/login` | 任何人 | 用 Google 的 ID Token 換登入憑證 |
 | `POST /auth/logout` | 任何人 | 讓帶來的憑證失效 |
 | `GET /auth/status` | 已登入 | 目前的狀態與角色 |
@@ -547,7 +547,7 @@ Open `.env` and fill in two values; the defaults are fine for the rest:
 .venv/bin/python app.py
 ```
 
-The service runs at `http://localhost:5180`. Tables are created automatically on start-up. Open `http://localhost:5180/health` in a browser; `{"status":"ok"}` means it is up. Then follow [`minyou_t_forum-web`](https://github.com/beethoreven/minyou_t_forum-web) to start the frontend.
+The service runs at `http://localhost:5180`. Tables are created automatically on start-up. Open `http://localhost:5180/health` in a browser; `{"status":"ok","version":"…"}` means it is up. Then follow [`minyou_t_forum-web`](https://github.com/beethoreven/minyou_t_forum-web) to start the frontend.
 
 ### 6. Run the Tests
 
@@ -586,7 +586,7 @@ The database runs on Neon and the backend on Render. **Pick the same region for 
 
 3. **Environment variables**: fill them in from the table in Part C. Don't wrap values in quotes.
 4. **Google Drive**: in Google Cloud Console, enable the Google Drive API, create a service account and download its JSON key; share the documents folder with the service account's email (it ends in `.iam.gserviceaccount.com`) as a viewer.
-5. Once deployed, open `https://<your-service>.onrender.com/health`; `{"status":"ok"}` means it is up. If a setting is wrong the service won't start, and the Logs say which setting.
+5. Once deployed, open `https://<your-service>.onrender.com/health`; `{"status":"ok","version":"…"}` means it is up. If a setting is wrong the service won't start, and the Logs say which setting.
 6. **Keep pictures in Google Drive (optional)**. Skip this and pictures are stored in the database, with exactly the same behaviour. Do it only if you want the pictures to appear in `Pic` under the documents folder:
    1. Signed in as the owner of the documents folder, open `https://script.google.com/home`, create a new project, and paste in the whole of `tools/apps_script/pictures.gs`.
    2. In Project Settings → Script Properties, add two: `SECRET` (a long random string of your own) and `FOLDER_ID` (the same as `DRIVE_FOLDER_ID`).
@@ -616,7 +616,7 @@ Errors are always `{"error": "message for people", "code": "code"}`.
 
 | Method and path | Who may use it | What it does |
 |---|---|---|
-| `GET /health` | Anyone | Whether the service is alive; doesn't touch the database |
+| `GET /health` | Anyone | Whether the service is alive, and which version is running (the first seven characters of the git commit; `local` on your own machine). Doesn't touch the database. After pushing a new version, watch this value change to know the deploy has finished |
 | `POST /auth/login` | Anyone | Exchanges Google's ID Token for a session token |
 | `POST /auth/logout` | Anyone | Invalidates the token sent with the request |
 | `GET /auth/status` | Signed in | The current status and role |

@@ -40,6 +40,8 @@ class Config:
     apps_script_secret: str | None = field(default=None, repr=False)
     session_idle_days: int = DEFAULT_SESSION_IDLE_DAYS
     port: int = DEFAULT_PORT
+    # 現在跑的是哪一版程式：git commit 的前七碼。在自己的電腦上是 "local"。
+    version: str = "local"
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -55,8 +57,22 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         first_admin_email=_email(_required(env, "FIRST_ADMIN_EMAIL")),
         session_idle_days=_number(env, "SESSION_IDLE_DAYS", DEFAULT_SESSION_IDLE_DAYS, 3650),
         port=_number(env, "PORT", DEFAULT_PORT, 65535),
+        version=_version(env),
         **_documents_source(env),
     )
+
+
+def _version(env: Mapping[str, str]) -> str:
+    """現在跑的是哪一版程式。
+
+    Render 每次部署都會把那一版的 git commit 放在 RENDER_GIT_COMMIT 這個環境變數裡。
+    /health 把它的前七碼回出去，推了新版之後，從外面就看得出換版了沒有。
+    長得不像 commit 的值一律不用，免得把環境變數裡不相干的內容回出去。
+    """
+    commit = env.get("RENDER_GIT_COMMIT", "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{7,40}", commit):
+        return commit[:7]
+    return "local"
 
 
 def _value(env: Mapping[str, str], key: str) -> str:

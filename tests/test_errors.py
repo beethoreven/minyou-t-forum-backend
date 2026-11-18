@@ -16,7 +16,7 @@ def assert_error(response, status, code):
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.get_json() == {"status": "ok"}
+    assert response.get_json() == {"status": "ok", "version": "local"}
 
 
 def test_unknown_path(client):
