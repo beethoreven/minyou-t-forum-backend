@@ -116,15 +116,15 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 
 文件的來源有兩種，介面相同（`documents/`）：正式環境讀 Google Drive，本機開發與測試讀一個本機資料夾。本機資料夾的版本不接受瀏覽器傳來的檔名或路徑，只接受清單裡出現過的代號，所以不管對方傳什麼，都拿不到資料夾以外的檔案。
 
-### 文章的附圖為什麼要靠一支 Apps Script
+### 文章的附圖存在哪裡
 
 發文章可以附圖，最多五張。圖片在瀏覽器裡先縮小成 480P 的 JPEG 才上傳，後端只檢查張數、大小與檔頭，不做影像處理。
 
-圖片放在文件資料夾底下的 `Pic` 資料夾。讀圖跟讀文件一樣用服務帳號；存圖卻不行：服務帳號在 Google Drive 沒有自己的儲存空間，在別人的資料夾裡建立檔案會被 Google 拒絕。所以存圖是請一支 Apps Script 代勞（`tools/apps_script/pictures.gs`）。它由資料夾的主人部署、用主人的身分執行，檔案算主人的。後端跟它之間用一個只有兩邊知道的密語確認身分，而且它只會動 `Pic` 資料夾。
+圖片預設存在資料庫（`stored_pictures` 表）。照理應該跟文件一樣放 Google Drive，但做不到：服務帳號在 Google Drive 沒有自己的儲存空間，也不能擁有檔案，就算把資料夾的編輯權限給它，它也沒辦法在個人的雲端硬碟裡建立檔案。這是 Google 的規定，[官方文件](https://developers.google.com/workspace/drive/api/guides/about-shareddrives)的建議是改用共用雲端硬碟（要 Google Workspace），或用真人的身分上傳。縮小後的圖片一張只有幾十 KB，放資料庫負擔不大，也不用另外申請任何儲存服務。
 
-沒有設定這支指令碼時，論壇照常運作，只是不能附圖。
+想把圖片放進 Google Drive 有一條路：部署一支 Apps Script 代為存檔（`tools/apps_script/pictures.gs`）。它由資料夾的主人部署、用主人的身分執行，所以檔案算主人的，會放進文件資料夾底下的 `Pic`。後端跟它之間用一個只有兩邊知道的密語確認身分，而且它只會動 `Pic` 資料夾。設定了它之後，新的圖才改存 Google Drive；之前存在資料庫的圖照樣看得到，因為從每張圖的代號就看得出它在哪裡。
 
-資料庫只記每張圖存放處的代號（`post_images` 表）。瀏覽器看圖時給的是資料庫那一筆的編號，不是存放處的代號，所以沒辦法用猜的拿到別的檔案。存圖要連到外面的服務，可能要好幾秒，所以是在兩次資料庫連線之間做的，不會佔著連線等。
+`post_images` 表記的是每張圖存放處的代號。瀏覽器看圖時給的是資料庫那一筆的編號，不是存放處的代號，所以沒辦法用猜的拿到別的檔案。存圖要連到外面的服務，可能要好幾秒，所以是在兩次資料庫連線之間做的，不會佔著連線等。
 
 同樣的限制也是後台的「新增文檔」不經過論壇上傳的原因：它只是把 Google Drive 的那個資料夾打開，由有編輯權限的人直接把檔案放進去。
 
@@ -268,7 +268,7 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 3. **環境變數**：照 Part C 的表填。值的前後不要加引號。
 4. **Google Drive**：在 Google Cloud Console 啟用 Google Drive API、建立服務帳號並下載 JSON 金鑰；把放文件的資料夾分享給服務帳號的 email（結尾是 `.iam.gserviceaccount.com`），權限選「檢視者」。
 5. 部署完成後打開 `https://<你的服務>.onrender.com/health`，看到 `{"status":"ok"}` 就是起來了。設定有錯的話服務起不來，Logs 裡會寫是哪一個設定。
-6. **開放附圖（可以之後再做）**：
+6. **把附圖放進 Google Drive（選用）**。不做這一步，附圖存在資料庫，功能完全一樣。想讓圖片出現在文件資料夾底下的 `Pic` 才需要：
    1. 用文件資料夾主人的 Google 帳號打開 `https://script.google.com/home`，建立新專案，把 `tools/apps_script/pictures.gs` 的內容整個貼進去。
    2. 專案設定 → 指令碼屬性，加兩個：`SECRET`（自己取一串夠長的亂碼）、`FOLDER_ID`（跟 `DRIVE_FOLDER_ID` 一樣）。
    3. 部署 → 新增部署作業 → 類型選「網頁應用程式」，執行身分選「我」，誰可以存取選「所有人」。第一次會要求授權存取 Google Drive。
@@ -286,7 +286,7 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `FIRST_ADMIN_EMAIL` | 必填 | 第一位管理員的 Google 帳號 |
 | `SERVICE_ACCOUNT_JSON` | 正式環境必填 | 服務帳號金鑰檔的完整內容 |
 | `DRIVE_FOLDER_ID` | 正式環境必填 | 文件資料夾的代號，就是資料夾網址最後那一段 |
-| `APPS_SCRIPT_URL`、`APPS_SCRIPT_SECRET` | 選填，兩個要一起填 | 代為存圖的 Apps Script 的網址與密語。沒填就不能附圖 |
+| `APPS_SCRIPT_URL`、`APPS_SCRIPT_SECRET` | 選填，兩個要一起填 | 代為存圖的 Apps Script 的網址與密語。有填，新的附圖存進 Google Drive 的 `Pic`；沒填，附圖存在資料庫 |
 | `DOCUMENTS_DIR` | 本機必填 | 本機的文件資料夾，附圖放在它底下的 `Pic`。跟上面四個只能擇一 |
 | `SESSION_IDLE_DAYS` | 選填，預設 90 | 登入憑證連續幾天沒用就失效 |
 | `PORT` | 選填，預設 5180 | 本機啟動用的 port |
@@ -435,15 +435,15 @@ Only ordinary files (PDF, Word, images and so on) are listed. Online formats suc
 
 There are two document sources with the same interface (`documents/`): production reads Google Drive, local development and tests read a local folder. The local-folder version accepts no file name or path from the browser, only an id that appeared in the listing, so whatever is sent, nothing outside the folder can be reached.
 
-### Why Post Pictures Rely on an Apps Script
+### Where Post Pictures Are Stored
 
 A post can carry up to five pictures. Each is shrunk to a 480p JPEG in the browser before upload; the backend only checks the count, the size and the file signature, and does no image processing.
 
-Pictures live in a `Pic` folder under the documents folder. Reading them uses the service account, just like documents; saving them cannot: a service account has no storage of its own in Google Drive, and Google refuses to let it create files in someone else's folder. So saving is delegated to an Apps Script (`tools/apps_script/pictures.gs`). The folder's owner deploys it and it runs as the owner, so the files belong to the owner. The backend and the script recognise each other by a secret only the two of them know, and the script touches nothing but the `Pic` folder.
+By default pictures are stored in the database (the `stored_pictures` table). It would seem natural to keep them in Google Drive like the documents, but that isn't possible: a service account has no storage of its own in Google Drive and cannot own files, so even with edit access to the folder it cannot create a file in a personal drive. This is Google's rule; the [official documentation](https://developers.google.com/workspace/drive/api/guides/about-shareddrives) advises using a shared drive instead (which needs Google Workspace) or uploading on behalf of a human user. A shrunk picture is only a few dozen KB, so the database carries it easily and no extra storage service has to be set up.
 
-Without the script configured the forum works as usual; pictures simply can't be attached.
+There is one way to keep pictures in Google Drive: deploy an Apps Script that saves them (`tools/apps_script/pictures.gs`). The folder's owner deploys it and it runs as the owner, so the files belong to the owner and land in `Pic` under the documents folder. The backend and the script recognise each other by a secret only the two of them know, and the script touches nothing but the `Pic` folder. Once it is configured, new pictures go to Google Drive; pictures saved in the database earlier remain visible, because each picture's id shows where it lives.
 
-The database records only where each picture is stored (the `post_images` table). A browser asks for a picture by that row's number, not by the storage id, so other files can't be reached by guessing. Saving has to call an outside service and may take several seconds, so it happens between two database connections rather than while holding one.
+The `post_images` table records where each picture is stored. A browser asks for a picture by that row's number, not by the storage id, so other files can't be reached by guessing. Saving has to call an outside service and may take several seconds, so it happens between two database connections rather than while holding one.
 
 The same limitation is why "add document" on the admin page doesn't upload through the forum: it just opens that Google Drive folder, and someone with edit access puts the file in directly.
 
@@ -587,7 +587,7 @@ The database runs on Neon and the backend on Render. **Pick the same region for 
 3. **Environment variables**: fill them in from the table in Part C. Don't wrap values in quotes.
 4. **Google Drive**: in Google Cloud Console, enable the Google Drive API, create a service account and download its JSON key; share the documents folder with the service account's email (it ends in `.iam.gserviceaccount.com`) as a viewer.
 5. Once deployed, open `https://<your-service>.onrender.com/health`; `{"status":"ok"}` means it is up. If a setting is wrong the service won't start, and the Logs say which setting.
-6. **Enable pictures (can be done later)**:
+6. **Keep pictures in Google Drive (optional)**. Skip this and pictures are stored in the database, with exactly the same behaviour. Do it only if you want the pictures to appear in `Pic` under the documents folder:
    1. Signed in as the owner of the documents folder, open `https://script.google.com/home`, create a new project, and paste in the whole of `tools/apps_script/pictures.gs`.
    2. In Project Settings → Script Properties, add two: `SECRET` (a long random string of your own) and `FOLDER_ID` (the same as `DRIVE_FOLDER_ID`).
    3. Deploy → New deployment → type "Web app", execute as "Me", who has access "Anyone". The first time, it asks you to authorize access to Google Drive.
@@ -605,7 +605,7 @@ A free-tier service goes to sleep after being idle for a while, and the next req
 | `FIRST_ADMIN_EMAIL` | Required | The first administrator's Google account |
 | `SERVICE_ACCOUNT_JSON` | Required in production | The full contents of the service account key file |
 | `DRIVE_FOLDER_ID` | Required in production | The documents folder's id, the last segment of the folder's URL |
-| `APPS_SCRIPT_URL`, `APPS_SCRIPT_SECRET` | Optional, set both together | The URL and secret of the Apps Script that saves pictures. Without them pictures can't be attached |
+| `APPS_SCRIPT_URL`, `APPS_SCRIPT_SECRET` | Optional, set both together | The URL and secret of the Apps Script that saves pictures. With them, new pictures go to `Pic` in Google Drive; without them, pictures are stored in the database |
 | `DOCUMENTS_DIR` | Required locally | A local documents folder; pictures go in `Pic` beneath it. Mutually exclusive with the four above |
 | `SESSION_IDLE_DAYS` | Optional, default 90 | Days of no use after which a session token expires |
 | `PORT` | Optional, default 5180 | The port used when running locally |

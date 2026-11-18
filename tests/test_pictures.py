@@ -1,10 +1,14 @@
 """文章附圖。測試用本機資料夾存圖，不連到 Google。"""
 
 import base64
+from dataclasses import replace
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
-from documents.pictures import DrivePictures, PicturesUnavailable
+from app import _sources
+from documents.pictures import DatabasePictures, DrivePictures, PicturesUnavailable, PictureStores
 
 # 不是真的圖片，只是檔頭長得像 JPEG 的幾個位元組：後端只檢查檔頭與大小。
 JPEG_A = b"\xff\xd8\xff\xe0" + b"first picture"
@@ -101,7 +105,97 @@ def test_editing_the_text_keeps_the_pictures(client):
     assert updated["images"] == post["images"]
 
 
-# ── 正式環境存圖的那一段：請 Apps Script 代勞 ──────────────
+# ── 正式環境預設的存放處：資料庫 ──────────────────────────
+
+
+def test_database_pictures_round_trip(app, config):
+    store = DatabasePictures(config.database_url)
+
+    ids = store.save([JPEG_A, JPEG_B])
+    assert len(ids) == 2
+    assert all(picture_id.startswith("db:") for picture_id in ids)
+    assert b"".join(store.open(ids[0])) == JPEG_A
+    assert b"".join(store.open(ids[1])) == JPEG_B
+    assert store.open("db:no-such-picture") is None
+
+    store.delete([ids[0]])
+    assert store.open(ids[0]) is None
+    assert b"".join(store.open(ids[1])) == JPEG_B
+
+
+class RecordingStore:
+    """記下自己被要求做了什麼的假存放處。"""
+
+    def __init__(self, name):
+        self.name = name
+        self.deleted = []
+
+    def save(self, images):
+        return [f"saved-by-{self.name}"]
+
+    def open(self, picture_id):
+        return iter([f"{self.name}:{picture_id}".encode()])
+
+    def delete(self, picture_ids):
+        self.deleted.extend(picture_ids)
+
+
+def test_pictures_are_found_by_where_their_id_says_they_are():
+    database, drive = RecordingStore("database"), RecordingStore("drive")
+    stores = PictureStores(writer=database, database=database, drive=drive)
+
+    assert stores.save([JPEG_A]) == ["saved-by-database"]  # 新的圖存進 writer
+    assert b"".join(stores.open("db:abc")) == b"database:db:abc"
+    assert b"".join(stores.open("drive-file-id")) == b"drive:drive-file-id"
+
+    stores.delete(["db:abc", "drive-file-id", "db:def"])
+    assert database.deleted == ["db:abc", "db:def"]
+    assert drive.deleted == ["drive-file-id"]
+
+
+def test_drive_pictures_cannot_save_without_the_script():
+    store = DrivePictures(session=None, script_url=None, script_secret=None)
+    with pytest.raises(PicturesUnavailable):
+        store.save([JPEG_A])
+    store.delete(["file-aaaaaaaaaa"])  # 刪不掉不算錯，不會丟例外
+
+
+def test_production_setup_picks_where_new_pictures_go(config):
+    """用 Google Drive 放文件時：沒設定 Apps Script，新的圖存資料庫；有設定才存 Google Drive。"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    service_account = {
+        "type": "service_account",
+        "client_email": "bot@example.iam.gserviceaccount.com",
+        "private_key": pem,
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+    on_drive = replace(
+        config,
+        documents_dir=None,
+        service_account_info=service_account,
+        drive_folder_id="folder-id-0123456789",
+    )
+
+    documents, pictures = _sources(on_drive)
+    assert documents.manage_info()["manage_url"].endswith("/folder-id-0123456789")
+    assert isinstance(pictures.writer, DatabasePictures)
+
+    with_script = replace(
+        on_drive,
+        apps_script_url="https://script.google.com/macros/s/x/exec",
+        apps_script_secret="s3cret",
+    )
+    _, pictures = _sources(with_script)
+    assert isinstance(pictures.writer, DrivePictures)
+    assert isinstance(pictures.database, DatabasePictures)  # 以前存在資料庫的圖還是找得到
+
+
+# ── 把圖存進 Google Drive 的那一段：請 Apps Script 代勞 ────
 
 
 class FakeReply:

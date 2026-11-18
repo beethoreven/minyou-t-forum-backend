@@ -80,6 +80,15 @@ STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS post_images_post_id_idx ON post_images (post_id)",
+    # 存在資料庫裡的圖片本身。post_images.file_id 是 db: 開頭的，內容就在這張表。
+    # 圖片上傳前已經縮小過，一張只有幾十 KB。
+    """
+    CREATE TABLE IF NOT EXISTS stored_pictures (
+        id         text PRIMARY KEY,
+        content    bytea NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+    )
+    """,
 )
 
 

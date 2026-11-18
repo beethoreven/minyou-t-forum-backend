@@ -23,7 +23,13 @@ from db.schema import ensure_schema
 from documents.base import DocumentFile, DocumentsUnavailable
 from documents.google_drive import GoogleDriveFolder
 from documents.local_folder import LocalFolder
-from documents.pictures import DrivePictures, LocalPictures, PicturesUnavailable
+from documents.pictures import (
+    DatabasePictures,
+    DrivePictures,
+    LocalPictures,
+    PicturesUnavailable,
+    PictureStores,
+)
 from errors import ApiError, register_error_handlers
 from timeutil import iso_utc
 
@@ -498,8 +504,10 @@ def create_app(
 def _sources(config: Config):
     """社區文檔與文章附圖放在哪裡。回傳（文檔的來源, 附圖的存放處）。
 
-    設定了本機資料夾就都用它；否則用 Google Drive。用 Google Drive 而沒有設定代為存圖的
-    Apps Script 時，附圖的存放處是 None，代表不開放附圖。
+    設定了本機資料夾就都用它（本機開發與測試）。
+
+    否則文檔讀 Google Drive。附圖預設存資料庫：論壇的服務帳號沒辦法把檔案寫進個人的
+    Google Drive。有設定代為存圖的 Apps Script 時，新的附圖才改存 Google Drive 的 Pic 資料夾。
     """
     if config.documents_dir is not None:
         config.documents_dir.mkdir(parents=True, exist_ok=True)
@@ -510,9 +518,10 @@ def _sources(config: Config):
         )
     except ValueError:
         raise ConfigError("SERVICE_ACCOUNT_JSON 的金鑰讀不進來，請重新下載金鑰檔再貼一次。") from None
-    if not config.apps_script_url:
-        return folder, None
-    return folder, DrivePictures(folder.session, config.apps_script_url, config.apps_script_secret)
+    database = DatabasePictures(config.database_url)
+    drive = DrivePictures(folder.session, config.apps_script_url, config.apps_script_secret)
+    writer = drive if config.apps_script_url else database
+    return folder, PictureStores(writer=writer, database=database, drive=drive)
 
 
 def main() -> None:
