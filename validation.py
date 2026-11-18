@@ -6,16 +6,20 @@
 
 import base64
 import binascii
+import unicodedata
 
 from flask import Request
 
 from errors import ApiError
 
-# 一篇文章最多幾張附圖、一張最大多少。web 會先把圖片縮到 480P 再送，通常只有幾十 KB；
-# 這裡的上限是用來擋不照規矩來的請求。
+# 一則公告、一篇文章最多幾張附圖、一張最大多少。web 會先把圖片縮到 480P 再送，通常只有
+# 幾十 KB；這裡的上限是用來擋不照規矩來的請求。
 MAX_IMAGES = 5
 MAX_IMAGE_BYTES = 300 * 1024
 JPEG_SIGNATURE = b"\xff\xd8\xff"
+
+# 上傳的文檔，檔名最多幾個字。
+FILE_NAME_MAX = 100
 
 TITLE_MAX = 100
 BODY_MAX = 10_000
@@ -63,7 +67,7 @@ def choice_field(data: dict, key: str, label: str, choices: tuple[str, ...]) -> 
 
 
 def images_field(data: dict) -> list[bytes]:
-    """讀文章的附圖：[{"data": "<base64 編碼的 JPEG>"}, …]。沒有附圖回傳空的清單。"""
+    """讀公告或文章的附圖：[{"data": "<base64 編碼的 JPEG>"}, …]。沒有附圖回傳空的清單。"""
     raw = data.get("images")
     if raw is None:
         return []
@@ -71,7 +75,7 @@ def images_field(data: dict) -> list[bytes]:
     if not isinstance(raw, list):
         raise invalid
     if len(raw) > MAX_IMAGES:
-        raise ApiError(400, "too_many_images", f"一篇文章最多 {MAX_IMAGES} 張圖")
+        raise ApiError(400, "too_many_images", f"最多只能附 {MAX_IMAGES} 張圖")
 
     images = []
     for item in raw:
@@ -92,6 +96,42 @@ def images_field(data: dict) -> list[bytes]:
             raise ApiError(400, "image_not_jpeg", "附圖必須是 JPEG 圖片")
         images.append(content)
     return images
+
+
+def uploaded_file(request: Request, max_bytes: int) -> tuple[str, bytes]:
+    """讀上傳的檔案，回傳（檔名, 內容）。
+
+    檔案要用 multipart/form-data 送，欄位名稱是 file：這是瀏覽器上傳檔案的標準格式。
+    """
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        raise ApiError(400, "file_required", "請選擇要上傳的檔案")
+    name = _file_name(file.filename)
+    # 多讀一個位元組，就分得出「剛好到上限」與「超過上限」，又不用把太大的檔案整個讀進來。
+    content = file.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ApiError(413, "file_too_large", f"檔案太大，最多 {max_bytes // (1024 * 1024)} MB")
+    if not content:
+        raise ApiError(400, "file_empty", "這個檔案是空的")
+    return name, content
+
+
+def _file_name(raw: str) -> str:
+    """把瀏覽器送來的檔名整理成可以放心使用的檔名：不帶路徑、不是隱藏檔、沒有控制字元。
+
+    不用 werkzeug 的 secure_filename：它只留英數字，中文的檔名會整個被拿掉。
+    """
+    # 有些瀏覽器送來的是完整路徑，只留最後一段。
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1]
+    # macOS 可能把一個字拆成「字母＋附加符號」兩個字元。統一成合起來的形式，同一個檔名才會是同一個字串。
+    name = unicodedata.normalize("NFC", name).strip()
+    # 「.」開頭的是隱藏檔，不會出現在文件清單上；「..」也在這裡一起擋掉。
+    has_control = any(ord(char) < 32 or ord(char) == 127 for char in name)
+    if not name or name.startswith(".") or has_control:
+        raise ApiError(400, "file_name_invalid", "這個檔名不能用，請改個檔名再上傳")
+    if len(name) > FILE_NAME_MAX:
+        raise ApiError(400, "file_name_too_long", f"檔名太長，最多 {FILE_NAME_MAX} 字")
+    return name
 
 
 def before_param(args) -> int | None:

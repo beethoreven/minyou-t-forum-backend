@@ -2,7 +2,7 @@
 
 ## 老爺華廈論壇 — 後端 API
 
-小社區住戶論壇的後端 API：登入、註冊審核、公告、文章與回覆、文件下載、成員管理。這份文件分成兩個獨立的部分，請依需求閱讀：
+小社區住戶論壇的後端 API：登入、註冊審核、公告、文章與回覆、文件的上傳與下載、成員管理。這份文件分成兩個獨立的部分，請依需求閱讀：
 
 - **[專案報告](#專案報告)**：這個系統是什麼、怎麼串起來的、每個決定的理由 —— 給想了解「這是什麼」的人看。
 - **[架設 SOP](#架設-sop)**：一步一步的操作說明 —— 給想「動手把它跑起來」的人看。
@@ -15,7 +15,7 @@
 
 ### 這是什麼
 
-一個給社區住戶用的小論壇，規模以一百人左右為準。住戶用 Google 帳號登入，註冊後要經過審核才能使用。功能刻意保持精簡：公告、文章與回覆、文件下載，以及管理成員的後台。
+一個給社區住戶用的小論壇，規模以一百人左右為準。住戶用 Google 帳號登入，註冊後要經過審核才能使用。功能刻意保持精簡：公告、文章與回覆（都可以附圖）、文件下載，以及新增公告、上傳文件、管理成員的後台。
 
 這支 repo 是後端，用 Flask 寫，資料存在 PostgreSQL。前端在另一支 repo [`minyou_t_forum-web`](https://github.com/beethoreven/minyou_t_forum-web)，兩者只透過這裡的 JSON API 溝通。
 
@@ -33,9 +33,10 @@ minyou_t_forum/                 總覽用的 repo，把下面兩支掛在一起�
    │  ② POST /auth/login：用 ID Token 換論壇自己的登入憑證
    │  ③ 之後每個請求都帶 Authorization: Bearer <登入憑證>
    ▼
-後端（這支 repo）──── PostgreSQL：成員、登入憑證、公告、文章、回覆
+後端（這支 repo）──── PostgreSQL：成員、登入憑證、公告、文章、回覆、附圖
    │
-   └──── Google Drive：社區文檔的檔案（用服務帳號讀一個資料夾）
+   ├──── Google Drive：社區文檔的檔案（用服務帳號讀一個資料夾）
+   └──── Apps Script：代替後端把檔案放進那個資料夾（用資料夾主人的身分執行）
 ```
 
 每個要保護的路由，進來的第一件事都是確認「這個請求是誰發的、他能不能做這件事」，規則集中在 `auth_utils/access.py`。
@@ -90,6 +91,7 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | 發文章、回覆；改或刪自己寫的 | ✓ | ✓ | ✓ |
 | 新增、編輯、刪除公告 | | ✓ | ✓ |
 | 編輯、刪除別人的文章與回覆 | | ✓ | ✓ |
+| 後台：上傳、刪除社區文檔 | | ✓ | ✓ |
 | 後台：審核註冊、停用與恢復帳號、設定版主 | | ✓ | ✓ |
 | 修改管理員的帳號、把別人設成管理員 | | | ✓ |
 
@@ -125,25 +127,50 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 
 ### 文件為什麼經過後端下載
 
-社區文檔放在 Google Drive 的一個資料夾。後端用服務帳號讀它：資料夾的主人把資料夾分享給服務帳號（檢視者），它就看得到這個資料夾，其他的都看不到，權限範圍也只申請唯讀。上架、下架、改名都直接在 Google Drive 做，論壇不需要上傳介面。
+社區文檔放在 Google Drive 的一個資料夾。後端用服務帳號讀它：資料夾的主人把資料夾分享給服務帳號（檢視者），它就看得到這個資料夾，其他的都看不到，權限範圍也只申請唯讀。
 
 檔案本身不公開，下載一律經過後端，所以只有已審核的成員拿得到。下載前先確認這個檔案真的在指定的資料夾裡：服務帳號看得到的檔案不一定只有這個資料夾的，不檢查的話，知道檔案代號的人就能下載到別的檔案。
 
 只列一般檔案（PDF、Word、圖片等）。Google 文件、試算表這類線上格式沒有「原始檔」可以下載，所以不列。
 
-文件的來源有兩種，介面相同（`documents/`）：正式環境讀 Google Drive，本機開發與測試讀一個本機資料夾。本機資料夾的版本不接受瀏覽器傳來的檔名或路徑，只接受清單裡出現過的代號，所以不管對方傳什麼，都拿不到資料夾以外的檔案。
+文件有哪些，一律以資料夾裡現在有什麼為準，資料庫裡不記。所以直接在 Google Drive 增減檔案，清單也會跟著變。
 
-### 文章的附圖存在哪裡
+文件的來源有兩種，介面相同（`documents/`）：正式環境用 Google Drive，本機開發與測試用一個本機資料夾。本機資料夾的版本不接受瀏覽器傳來的檔名或路徑，只接受清單裡出現過的代號，所以不管對方傳什麼，都碰不到資料夾以外的檔案。
 
-發文章可以附圖，最多五張。圖片在瀏覽器裡先縮小成 480P 的 JPEG 才上傳，後端只檢查張數、大小與檔頭，不做影像處理。
+### 文檔怎麼從後台傳進個人的 Google Drive
 
-圖片預設存在資料庫（`stored_pictures` 表）。照理應該跟文件一樣放 Google Drive，但做不到：服務帳號在 Google Drive 沒有自己的儲存空間，也不能擁有檔案，就算把資料夾的編輯權限給它，它也沒辦法在個人的雲端硬碟裡建立檔案。這是 Google 的規定，[官方文件](https://developers.google.com/workspace/drive/api/guides/about-shareddrives)的建議是改用共用雲端硬碟（要 Google Workspace），或用真人的身分上傳。縮小後的圖片一張只有幾十 KB，放資料庫負擔不大，也不用另外申請任何儲存服務。
+版主與管理員在後台選檔案上傳，檔案最後要進資料夾主人的 Google Drive。難的地方是後端自己寫不進去：服務帳號在 Google Drive 沒有自己的儲存空間，也不能擁有檔案，就算把資料夾的編輯權限給它，它也沒辦法在個人的雲端硬碟裡建立檔案。這是 Google 的規定，[官方文件](https://developers.google.com/workspace/drive/api/guides/about-shareddrives)的建議是改用共用雲端硬碟（要 Google Workspace），或用真人的身分上傳。
 
-想把圖片放進 Google Drive 有一條路：部署一支 Apps Script 代為存檔（`tools/apps_script/pictures.gs`）。它由資料夾的主人部署、用主人的身分執行，所以檔案算主人的，會放進文件資料夾底下的 `Pic`。後端跟它之間用一個只有兩邊知道的密語確認身分，而且它只會動 `Pic` 資料夾。設定了它之後，新的圖才改存 Google Drive；之前存在資料庫的圖照樣看得到，因為從每張圖的代號就看得出它在哪裡。
+讓上傳的人用自己的 Google 帳號授權也不行：他的授權只能寫進他自己的雲端硬碟，而這裡要的是不管誰上傳，檔案都進同一個資料夾。
 
-`post_images` 表記的是每張圖存放處的代號。瀏覽器看圖時給的是資料庫那一筆的編號，不是存放處的代號，所以沒辦法用猜的拿到別的檔案。存圖要連到外面的服務，可能要好幾秒，所以是在兩次資料庫連線之間做的，不會佔著連線等。
+所以寫入是請一支 Apps Script 代勞（`tools/apps_script/documents.gs`）。它由資料夾的主人部署成網頁應用程式、用主人的身分執行，檔案就算主人的：
 
-同樣的限制也是後台的「新增文檔」不經過論壇上傳的原因：它只是把 Google Drive 的那個資料夾打開，由有編輯權限的人直接把檔案放進去。
+```
+瀏覽器 ──（表單上傳，帶登入憑證）──▶ 後端 ──（JSON，帶密語）──▶ Apps Script ──▶ Google Drive 的資料夾
+```
+
+- 那支指令碼的網址任何人都連得到，所以後端跟它之間用一個只有兩邊知道的密語確認身分，沒有密語的請求一律拒絕。它只會動設定裡那一個資料夾的檔案。
+- 瀏覽器不直接連 Apps Script：密語只放在後端，「是不是版主或管理員」、檔名與大小的檢查也都在後端做。
+- 上傳同名的檔案時，新的確定放進去之後，舊的才丟進垃圾桶。刪除也是丟進垃圾桶。Google Drive 的垃圾桶會留 30 天，刪錯了主人還救得回來。
+- 一個檔案最多 10 MB。檔名保留中文，只拿掉路徑、擋掉隱藏檔與控制字元。不用 Werkzeug 的 `secure_filename`：它只留英數字，中文的檔名會整個被拿掉。
+- 沒有設定這支指令碼時，文檔照樣讀得到，只是後台不能上傳，會改成請人直接到 Google Drive 的資料夾放檔案。
+- 設定不對的時候（密語對不上、資料夾代號不對、網址或部署方式不對），後台看到的錯誤訊息會寫出該檢查哪一項設定，不用去翻伺服器的 log。訊息裡只有設定的名稱，沒有設定的值。
+
+### 換一個 Google 帳號放文檔時要改什麼
+
+存放文檔的帳號沒有寫死在任何地方。後端只認三個設定：資料夾的代號（`DRIVE_FOLDER_ID`）、指令碼的網址（`APPS_SCRIPT_URL`）與密語（`APPS_SCRIPT_SECRET`）。指令碼自己也只認它的兩個指令碼屬性。資料庫裡沒有記任何一個 Google Drive 的檔案代號。
+
+所以要改由另一個 Google 帳號存放文檔時，新的主人準備一個資料夾、部署一份同樣的指令碼，再把那三個設定換成新的就好，程式與資料庫都不用動。步驟在架設 SOP 的 Part B。
+
+### 附圖存在哪裡
+
+公告與文章都可以附圖，最多五張。圖片在瀏覽器裡先縮小成 480P 的 JPEG 才上傳，後端只檢查張數、大小與檔頭，不做影像處理。
+
+圖片存在資料庫（`stored_pictures` 表），不放 Google Drive。附圖是每一位住戶發文時都會用到的功能：放資料庫的話，發文不用等外面的服務回應，也不會因為外面的服務出狀況而發不出去。縮小後的圖片一張只有幾十 KB，資料庫放得下。
+
+`announcement_images` 與 `post_images` 兩張表記的是「哪一張圖屬於哪一則公告、哪一篇文章」。瀏覽器看圖時給的是這兩張表裡的編號，而且要同時說出是哪一則公告或哪一篇文章的圖，所以沒辦法用猜的拿到別的圖。看圖跟看內文一樣，要是已審核的成員。
+
+新增時，內文、圖片、兩者的對應在同一筆資料庫交易裡寫入：要嘛全部成功，要嘛什麼都沒有留下，不會有「文章沒發成功，圖片卻留在資料庫」的情況。刪除也是同一筆交易。
 
 ### 列表為什麼用 before，不用頁碼
 
@@ -180,9 +207,9 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | `auth_utils/sessions.py` | 論壇自己的登入憑證 |
 | `auth_utils/access.py` | 權限規則 |
 | `auth_utils/guard.py` | 防濫用：請求頻率、發文數量、登入憑證數量的限制 |
-| `db/` | 連線、建表（`schema.py`）、各資料表的讀寫 |
-| `documents/` | 文件清單與下載：`google_drive.py`、`local_folder.py`；文章附圖的存放：`pictures.py` |
-| `tools/apps_script/pictures.gs` | 代替後端把附圖存進 Google Drive 的 Apps Script |
+| `db/` | 連線、建表（`schema.py`）、各資料表的讀寫；附圖的內容在 `pictures.py` |
+| `documents/` | 文件的清單、下載、上傳、刪除：`google_drive.py`、`local_folder.py` |
+| `tools/apps_script/documents.gs` | 代替後端把文檔放進 Google Drive 的 Apps Script |
 | `tools/local_db.sh` | 本機開發用的 PostgreSQL |
 | `tools/dev_session.py` | 本機開發時不經過 Google，直接發登入憑證 |
 | `tests/` | pytest 測試 |
@@ -193,9 +220,10 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 - 頻率與數量的限制只算已經登入的人。沒登入的大量請求（例如對登入那一支狂打）沒有另外擋，要靠主機前面的防護。
 - 沒有資料庫遷移工具。服務啟動時只會建立還不存在的表；要改既有的表，要另外寫 SQL 手動執行。
 - 文件清單每次都向 Google Drive 查，沒有快取。
-- 沒有通知（審核通過不會寄信）、沒有搜尋、沒有操作紀錄。公告不能附圖。
-- 文章的附圖只能在發文時選，之後不能更換；要換圖只能刪掉文章重新發。
-- 讀寫 Google Drive 的部分，自動測試用的是假的回應，不會真的連到 Google。
+- 沒有通知（審核通過不會寄信）、沒有搜尋、沒有操作紀錄。
+- 公告與文章的附圖只能在新增時選，之後不能更換；要換圖只能刪掉重新發。
+- 上傳的文檔一個最多 10 MB，而且整個檔案會先讀進後端的記憶體再轉交出去，不適合放很大的檔案。
+- 讀寫 Google Drive 的部分，自動測試用的是假的回應，不會真的連到 Google。Apps Script 是在 Google 那邊執行的，不在自動測試的範圍內。
 
 ---
 
@@ -287,11 +315,27 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 3. **環境變數**：照 Part C 的表填。值的前後不要加引號。
 4. **Google Drive**：在 Google Cloud Console 啟用 Google Drive API、建立服務帳號並下載 JSON 金鑰；把放文件的資料夾分享給服務帳號的 email（結尾是 `.iam.gserviceaccount.com`），權限選「檢視者」。
 5. 部署完成後打開 `https://<你的服務>.onrender.com/health`，看到 `{"status":"ok","version":"…"}` 就是起來了。設定有錯的話服務起不來，Logs 裡會寫是哪一個設定。
-6. **把附圖放進 Google Drive（選用）**。不做這一步，附圖存在資料庫，功能完全一樣。想讓圖片出現在文件資料夾底下的 `Pic` 才需要：
-   1. 用文件資料夾主人的 Google 帳號打開 `https://script.google.com/home`，建立新專案，把 `tools/apps_script/pictures.gs` 的內容整個貼進去。
+6. **開啟後台的文檔上傳**。不做這一步，文檔照樣讀得到，但後台不能上傳，只能直接到 Google Drive 的資料夾放檔案。
+   1. 用文件資料夾主人的 Google 帳號打開 `https://script.google.com/home`，建立新專案，把 `tools/apps_script/documents.gs` 的內容整個貼進去，取代原本的內容。
    2. 專案設定 → 指令碼屬性，加兩個：`SECRET`（自己取一串夠長的亂碼）、`FOLDER_ID`（跟 `DRIVE_FOLDER_ID` 一樣）。
-   3. 部署 → 新增部署作業 → 類型選「網頁應用程式」，執行身分選「我」，誰可以存取選「所有人」。第一次會要求授權存取 Google Drive。
-   4. 把部署後的網址填進 Render 的 `APPS_SCRIPT_URL`，剛剛那串亂碼填進 `APPS_SCRIPT_SECRET`。
+   3. 部署 → 新增部署作業 → 類型選「網頁應用程式」，執行身分選「我」，誰可以存取選「所有人」。第一次會要求授權存取 Google Drive，畫面會警告這個應用程式未經 Google 驗證：它是你自己寫給自己用的，所以沒有送審，按「進階」繼續即可。
+   4. 把部署後的網址（結尾是 `/exec`）填進 Render 的 `APPS_SCRIPT_URL`，剛剛那串亂碼填進 `APPS_SCRIPT_SECRET`。
+   5. 到後台的「文檔」上傳一個檔案試試看。失敗的話，畫面上的訊息會寫該檢查哪一項設定。
+
+   之後如果修改了指令碼的內容，要到「管理部署作業」把那個部署更新成新的版本，原本的網址才會執行新的內容。
+
+### 之後要換一個 Google 帳號放文檔
+
+程式與資料庫都不用改，只換設定：
+
+1. 還要用的舊檔案，先從「社區文檔」下載下來。
+2. 新的主人在自己的 Google Drive 建一個資料夾，分享給服務帳號的 email（檢視者）。
+3. 新的主人用自己的帳號照上面第 6 步部署一份 Apps Script：`FOLDER_ID` 填新資料夾的代號，`SECRET` 另外取一串新的。
+4. 到 Render 把 `DRIVE_FOLDER_ID`、`APPS_SCRIPT_URL`、`APPS_SCRIPT_SECRET` 換成新的三個值。儲存後服務會自動重新部署。
+5. 到後台把第 1 步下載的檔案重新上傳，再到「社區文檔」確認都列得出來。從後台上傳的檔案，主人就是新的帳號。
+6. 舊的主人到 Apps Script 的「管理部署作業」把舊的部署封存，舊的網址就失效了。
+
+### 讓服務保持醒著
 
 免費方案的服務閒置一陣子就會休息，下一個請求要等它醒來。想讓它保持醒著，可以用外部的排程服務每 10 分鐘打一次 `/health`；這支不碰資料庫。
 
@@ -305,8 +349,8 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `FIRST_ADMIN_EMAIL` | 必填 | 第一位管理員的 Google 帳號 |
 | `SERVICE_ACCOUNT_JSON` | 正式環境必填 | 服務帳號金鑰檔的完整內容 |
 | `DRIVE_FOLDER_ID` | 正式環境必填 | 文件資料夾的代號，就是資料夾網址最後那一段 |
-| `APPS_SCRIPT_URL`、`APPS_SCRIPT_SECRET` | 選填，兩個要一起填 | 代為存圖的 Apps Script 的網址與密語。有填，新的附圖存進 Google Drive 的 `Pic`；沒填，附圖存在資料庫 |
-| `DOCUMENTS_DIR` | 本機必填 | 本機的文件資料夾，附圖放在它底下的 `Pic`。跟上面四個只能擇一 |
+| `APPS_SCRIPT_URL`、`APPS_SCRIPT_SECRET` | 選填，兩個要一起填 | 代為把文檔放進 Google Drive 的 Apps Script 的網址與密語。有填，後台才能上傳、刪除文檔；沒填，文檔照樣讀得到，但要直接到 Google Drive 的資料夾放檔案 |
+| `DOCUMENTS_DIR` | 本機必填 | 本機的文件資料夾，後台上傳的檔案直接放進去。跟上面四個只能擇一 |
 | `SESSION_IDLE_DAYS` | 選填，預設 90 | 登入憑證連續幾天沒用就失效 |
 | `PORT` | 選填，預設 5180 | 本機啟動用的 port |
 
@@ -322,7 +366,9 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `GET /auth/status` | 已登入 | 目前的狀態與角色 |
 | `POST /auth/register` | 已登入、還沒有帳號 | 送出顯示名稱與戶號，建立審核中的帳號 |
 | `GET /announcements`、`GET /announcements/<id>` | 已審核 | 公告列表、公告內容 |
-| `POST /announcements`、`PUT`、`DELETE /announcements/<id>` | 版主、管理員 | 新增、編輯、刪除公告 |
+| `GET /announcements/<id>/images/<圖片編號>` | 已審核 | 公告的一張附圖 |
+| `POST /announcements` | 版主、管理員 | 新增公告，可以附最多五張圖 |
+| `PUT /announcements/<id>`、`DELETE /announcements/<id>` | 版主、管理員 | 編輯、刪除公告 |
 | `GET /posts`、`GET /posts/<id>` | 已審核 | 文章列表、文章內容與回覆 |
 | `POST /posts` | 已審核 | 新增文章，可以附最多五張圖 |
 | `GET /posts/<id>/images/<圖片編號>` | 已審核 | 文章的一張附圖 |
@@ -332,7 +378,9 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `GET /documents`、`GET /documents/<file_id>/download` | 已審核 | 文件清單、下載 |
 | `GET /admin/users` | 版主、管理員 | 成員列表 |
 | `PUT /admin/users/<id>` | 版主、管理員 | 改顯示名稱、戶號、角色、狀態 |
-| `GET /admin/documents` | 版主、管理員 | 文件放在哪裡、要去哪裡新增 |
+| `GET /admin/documents` | 版主、管理員 | 能不能從後台上傳文檔、一個檔案最大多少 |
+| `POST /admin/documents` | 版主、管理員 | 上傳一份文檔：`multipart/form-data`，欄位名稱 `file`，最多 10 MB。同名的檔案會被取代 |
+| `DELETE /admin/documents/<file_id>` | 版主、管理員 | 刪除一份文檔 |
 
 ---
 
@@ -340,7 +388,7 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 
 ## 老爺華廈論壇 — Backend API
 
-The backend API of a small residents' forum: sign-in, registration review, announcements, posts and replies, document downloads, and member management. This document has two independent parts; read whichever you need:
+The backend API of a small residents' forum: sign-in, registration review, announcements, posts and replies, document uploads and downloads, and member management. This document has two independent parts; read whichever you need:
 
 - **[Project Report](#project-report)**: what this system is, how it fits together, and the reason behind each decision — for readers who want to understand it.
 - **[Setup Guide](#setup-guide)**: step-by-step instructions — for readers who want to get it running.
@@ -353,7 +401,7 @@ The two parts are deliberately separate; don't cross-read them. The report is ba
 
 ### What This Is
 
-A small forum for the residents of one community, sized for about a hundred people. Residents sign in with a Google account and must be reviewed after registering before they can use it. The feature set is deliberately small: announcements, posts and replies, document downloads, and an admin page for managing members.
+A small forum for the residents of one community, sized for about a hundred people. Residents sign in with a Google account and must be reviewed after registering before they can use it. The feature set is deliberately small: announcements, posts and replies (both can carry pictures), document downloads, and an admin page for adding announcements, uploading documents and managing members.
 
 This repo is the backend, written with Flask and storing data in PostgreSQL. The frontend lives in a separate repo, [`minyou_t_forum-web`](https://github.com/beethoreven/minyou_t_forum-web); the two talk only through the JSON API here.
 
@@ -371,9 +419,10 @@ Browser (frontend)
    │  ② POST /auth/login: exchange the ID Token for the forum's own session token
    │  ③ Every later request carries Authorization: Bearer <session token>
    ▼
-Backend (this repo) ──── PostgreSQL: members, sessions, announcements, posts, replies
+Backend (this repo) ──── PostgreSQL: members, sessions, announcements, posts, replies, pictures
    │
-   └──── Google Drive: the community documents (one folder, read with a service account)
+   ├──── Google Drive: the community documents (one folder, read with a service account)
+   └──── Apps Script: puts files into that folder on the backend's behalf (runs as the folder's owner)
 ```
 
 The first thing every protected route does is establish who sent the request and whether they may do this. The rules live in `auth_utils/access.py`.
@@ -428,6 +477,7 @@ Permissions nest: administrator ⊃ moderator ⊃ regular user.
 | Write posts and replies; edit or delete their own | ✓ | ✓ | ✓ |
 | Create, edit and delete announcements | | ✓ | ✓ |
 | Edit and delete other people's posts and replies | | ✓ | ✓ |
+| Admin page: upload and delete community documents | | ✓ | ✓ |
 | Admin page: review registrations, disable and restore accounts, appoint moderators | | ✓ | ✓ |
 | Change an administrator's account; make someone an administrator | | | ✓ |
 
@@ -463,25 +513,50 @@ Lengths are counted in Unicode characters (one Chinese character or one emoji co
 
 ### Why Documents Are Downloaded Through the Backend
 
-The community documents sit in one Google Drive folder. The backend reads it with a service account: the folder's owner shares the folder with the service account (as a viewer), which can then see that folder and nothing else, and only the read-only scope is requested. Adding, removing and renaming files is done directly in Google Drive, so the forum needs no upload page.
+The community documents sit in one Google Drive folder. The backend reads it with a service account: the folder's owner shares the folder with the service account (as a viewer), which can then see that folder and nothing else, and only the read-only scope is requested.
 
 The files themselves are not public; every download goes through the backend, so only approved members can get them. Before downloading, the backend confirms the file really is in the configured folder: the service account may be able to see files outside it, and without the check anyone who knew a file's id could download it.
 
 Only ordinary files (PDF, Word, images and so on) are listed. Online formats such as Google Docs and Sheets have no "original file" to download, so they are left out.
 
-There are two document sources with the same interface (`documents/`): production reads Google Drive, local development and tests read a local folder. The local-folder version accepts no file name or path from the browser, only an id that appeared in the listing, so whatever is sent, nothing outside the folder can be reached.
+Which documents exist is always whatever the folder holds right now; the database keeps no record of them. So adding or removing a file directly in Google Drive changes the list too.
 
-### Where Post Pictures Are Stored
+There are two document sources with the same interface (`documents/`): production uses Google Drive, local development and tests use a local folder. The local-folder version accepts no file name or path from the browser, only an id that appeared in the listing, so whatever is sent, nothing outside the folder can be touched.
 
-A post can carry up to five pictures. Each is shrunk to a 480p JPEG in the browser before upload; the backend only checks the count, the size and the file signature, and does no image processing.
+### How Documents Get from the Admin Page into a Personal Google Drive
 
-By default pictures are stored in the database (the `stored_pictures` table). It would seem natural to keep them in Google Drive like the documents, but that isn't possible: a service account has no storage of its own in Google Drive and cannot own files, so even with edit access to the folder it cannot create a file in a personal drive. This is Google's rule; the [official documentation](https://developers.google.com/workspace/drive/api/guides/about-shareddrives) advises using a shared drive instead (which needs Google Workspace) or uploading on behalf of a human user. A shrunk picture is only a few dozen KB, so the database carries it easily and no extra storage service has to be set up.
+Moderators and administrators pick a file on the admin page, and the file has to end up in the folder owner's Google Drive. The hard part is that the backend cannot write there itself: a service account has no storage of its own in Google Drive and cannot own files, so even with edit access to the folder it cannot create a file in a personal drive. This is Google's rule; the [official documentation](https://developers.google.com/workspace/drive/api/guides/about-shareddrives) advises using a shared drive instead (which needs Google Workspace) or uploading on behalf of a human user.
 
-There is one way to keep pictures in Google Drive: deploy an Apps Script that saves them (`tools/apps_script/pictures.gs`). The folder's owner deploys it and it runs as the owner, so the files belong to the owner and land in `Pic` under the documents folder. The backend and the script recognise each other by a secret only the two of them know, and the script touches nothing but the `Pic` folder. Once it is configured, new pictures go to Google Drive; pictures saved in the database earlier remain visible, because each picture's id shows where it lives.
+Having the uploader authorize with their own Google account doesn't work either: that authorization can only write to their own drive, and what is needed here is that every upload, whoever makes it, lands in the same folder.
 
-The `post_images` table records where each picture is stored. A browser asks for a picture by that row's number, not by the storage id, so other files can't be reached by guessing. Saving has to call an outside service and may take several seconds, so it happens between two database connections rather than while holding one.
+So writing is delegated to an Apps Script (`tools/apps_script/documents.gs`). The folder's owner deploys it as a web app that runs as the owner, so the files belong to the owner:
 
-The same limitation is why "add document" on the admin page doesn't upload through the forum: it just opens that Google Drive folder, and someone with edit access puts the file in directly.
+```
+Browser ──(form upload, with the session token)──▶ Backend ──(JSON, with the secret)──▶ Apps Script ──▶ the Google Drive folder
+```
+
+- Anyone can reach the script's URL, so the backend and the script recognise each other by a secret only the two of them know, and a request without it is refused. The script touches only the files in the one configured folder.
+- The browser never talks to the Apps Script directly: the secret lives only on the backend, and the checks — is this a moderator or administrator, is the file name and size acceptable — are all done there.
+- When a file with the same name is uploaded, the old one goes to the trash only after the new one is safely in place. Deleting also moves the file to the trash. Google Drive keeps the trash for 30 days, so the owner can still recover a mistaken delete.
+- One file may be at most 10 MB. File names keep their Chinese characters; only the path is dropped, and hidden files and control characters are refused. Werkzeug's `secure_filename` isn't used: it keeps ASCII letters and digits only, so a Chinese file name would be stripped away entirely.
+- Without the script configured, documents can still be read; the admin page just can't upload, and instead asks people to put files into the Google Drive folder directly.
+- When a setting is wrong (the secret doesn't match, the folder id is wrong, the URL or the deployment is wrong), the error message shown on the admin page says which setting to check, so nobody has to dig through the server log. The message names settings and never includes their values.
+
+### What Changes When Another Google Account Takes Over the Documents
+
+The account that holds the documents isn't hard-coded anywhere. The backend knows only three settings: the folder's id (`DRIVE_FOLDER_ID`), the script's URL (`APPS_SCRIPT_URL`) and the secret (`APPS_SCRIPT_SECRET`). The script itself knows only its two script properties. The database records no Google Drive file id at all.
+
+So to have a different Google account hold the documents, the new owner prepares a folder and deploys a copy of the same script, and those three settings are replaced with the new values; neither the code nor the database changes. The steps are in Part B of the Setup Guide.
+
+### Where Pictures Are Stored
+
+Announcements and posts can each carry up to five pictures. Each is shrunk to a 480p JPEG in the browser before upload; the backend only checks the count, the size and the file signature, and does no image processing.
+
+Pictures are stored in the database (the `stored_pictures` table), not in Google Drive. Attaching a picture is something every resident does when posting: with the pictures in the database, posting doesn't wait on an outside service and can't fail because that service is having trouble. A shrunk picture is only a few dozen KB, which the database carries easily.
+
+The `announcement_images` and `post_images` tables record which picture belongs to which announcement or post. A browser asks for a picture by its number in those tables, and must also say which announcement or post it belongs to, so other pictures can't be reached by guessing. Seeing a picture needs the same thing as reading the text: being an approved member.
+
+On creation, the text, the pictures and the links between them are written in one database transaction: either everything succeeds or nothing is left behind, so a failed post can never leave its pictures in the database. Deletion is one transaction too.
 
 ### Why Lists Use `before` Instead of Page Numbers
 
@@ -518,9 +593,9 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 | `auth_utils/sessions.py` | The forum's own session tokens |
 | `auth_utils/access.py` | Permission rules |
 | `auth_utils/guard.py` | Abuse limits: request rate, posting counts, session token count |
-| `db/` | Connection, table creation (`schema.py`), and reads and writes per table |
-| `documents/` | Document listing and download: `google_drive.py`, `local_folder.py`; post picture storage: `pictures.py` |
-| `tools/apps_script/pictures.gs` | The Apps Script that saves pictures into Google Drive on the backend's behalf |
+| `db/` | Connection, table creation (`schema.py`), and reads and writes per table; picture contents are in `pictures.py` |
+| `documents/` | Listing, downloading, uploading and deleting documents: `google_drive.py`, `local_folder.py` |
+| `tools/apps_script/documents.gs` | The Apps Script that puts documents into Google Drive on the backend's behalf |
 | `tools/local_db.sh` | PostgreSQL for local development |
 | `tools/dev_session.py` | Issues a session token directly during local development, bypassing Google |
 | `tests/` | pytest tests |
@@ -531,9 +606,10 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 - The rate and count limits apply only to signed-in people. A flood of requests without a session (hammering the sign-in route, say) isn't stopped here and relies on whatever protection sits in front of the host.
 - There is no database migration tool. On start-up the service only creates tables that don't exist yet; changing an existing table means writing and running SQL by hand.
 - The document list is fetched from Google Drive every time, with no cache.
-- There are no notifications (no email when a registration is approved), no search, and no audit log. Announcements can't carry pictures.
-- A post's pictures can only be chosen when the post is created and can't be replaced afterwards; to change them, delete the post and write it again.
-- The code that reads and writes Google Drive is tested with fake responses; the automated tests never contact Google.
+- There are no notifications (no email when a registration is approved), no search, and no audit log.
+- The pictures of an announcement or post can only be chosen when it is created and can't be replaced afterwards; to change them, delete it and write it again.
+- An uploaded document may be at most 10 MB, and the whole file is read into the backend's memory before being passed on, so this isn't suited to very large files.
+- The code that reads and writes Google Drive is tested with fake responses; the automated tests never contact Google. The Apps Script runs on Google's side and is outside the automated tests.
 
 ---
 
@@ -625,11 +701,27 @@ The database runs on Neon and the backend on Render. **Pick the same region for 
 3. **Environment variables**: fill them in from the table in Part C. Don't wrap values in quotes.
 4. **Google Drive**: in Google Cloud Console, enable the Google Drive API, create a service account and download its JSON key; share the documents folder with the service account's email (it ends in `.iam.gserviceaccount.com`) as a viewer.
 5. Once deployed, open `https://<your-service>.onrender.com/health`; `{"status":"ok","version":"…"}` means it is up. If a setting is wrong the service won't start, and the Logs say which setting.
-6. **Keep pictures in Google Drive (optional)**. Skip this and pictures are stored in the database, with exactly the same behaviour. Do it only if you want the pictures to appear in `Pic` under the documents folder:
-   1. Signed in as the owner of the documents folder, open `https://script.google.com/home`, create a new project, and paste in the whole of `tools/apps_script/pictures.gs`.
+6. **Turn on document uploads on the admin page**. Skip this and documents can still be read, but the admin page can't upload; files have to be put into the Google Drive folder directly.
+   1. Signed in as the owner of the documents folder, open `https://script.google.com/home`, create a new project, and paste in the whole of `tools/apps_script/documents.gs`, replacing what is there.
    2. In Project Settings → Script Properties, add two: `SECRET` (a long random string of your own) and `FOLDER_ID` (the same as `DRIVE_FOLDER_ID`).
-   3. Deploy → New deployment → type "Web app", execute as "Me", who has access "Anyone". The first time, it asks you to authorize access to Google Drive.
-   4. Put the deployment's URL into Render's `APPS_SCRIPT_URL` and the random string into `APPS_SCRIPT_SECRET`.
+   3. Deploy → New deployment → type "Web app", execute as "Me", who has access "Anyone". The first time, it asks you to authorize access to Google Drive and warns that the app isn't verified by Google: it is a script you wrote for your own use and was never submitted for review, so choose "Advanced" and continue.
+   4. Put the deployment's URL (it ends in `/exec`) into Render's `APPS_SCRIPT_URL` and the random string into `APPS_SCRIPT_SECRET`.
+   5. Upload a file from "Documents" on the admin page to try it. If it fails, the message on screen says which setting to check.
+
+   If you edit the script later, open "Manage deployments" and update that deployment to a new version; only then does the same URL run the new code.
+
+### Moving the Documents to Another Google Account Later
+
+Neither the code nor the database changes, only settings:
+
+1. Download the old files that are still needed from "Community Documents".
+2. The new owner creates a folder in their own Google Drive and shares it with the service account's email (as a viewer).
+3. The new owner, signed in as themselves, deploys an Apps Script as in step 6 above: `FOLDER_ID` is the new folder's id, and `SECRET` is a fresh random string.
+4. In Render, replace `DRIVE_FOLDER_ID`, `APPS_SCRIPT_URL` and `APPS_SCRIPT_SECRET` with the three new values. Saving redeploys the service automatically.
+5. Upload the files from step 1 again on the admin page, then check that "Community Documents" lists them all. Files uploaded from the admin page belong to the new account.
+6. The old owner opens "Manage deployments" in Apps Script and archives the old deployment, which makes the old URL stop working.
+
+### Keeping the Service Awake
 
 A free-tier service goes to sleep after being idle for a while, and the next request waits for it to wake. To keep it awake, have an external scheduler request `/health` every 10 minutes; that route doesn't touch the database.
 
@@ -643,8 +735,8 @@ A free-tier service goes to sleep after being idle for a while, and the next req
 | `FIRST_ADMIN_EMAIL` | Required | The first administrator's Google account |
 | `SERVICE_ACCOUNT_JSON` | Required in production | The full contents of the service account key file |
 | `DRIVE_FOLDER_ID` | Required in production | The documents folder's id, the last segment of the folder's URL |
-| `APPS_SCRIPT_URL`, `APPS_SCRIPT_SECRET` | Optional, set both together | The URL and secret of the Apps Script that saves pictures. With them, new pictures go to `Pic` in Google Drive; without them, pictures are stored in the database |
-| `DOCUMENTS_DIR` | Required locally | A local documents folder; pictures go in `Pic` beneath it. Mutually exclusive with the four above |
+| `APPS_SCRIPT_URL`, `APPS_SCRIPT_SECRET` | Optional, set both together | The URL and secret of the Apps Script that puts documents into Google Drive. With them, the admin page can upload and delete documents; without them, documents can still be read, but files have to be put into the Google Drive folder directly |
+| `DOCUMENTS_DIR` | Required locally | A local documents folder; files uploaded from the admin page go straight into it. Mutually exclusive with the four above |
 | `SESSION_IDLE_DAYS` | Optional, default 90 | Days of no use after which a session token expires |
 | `PORT` | Optional, default 5180 | The port used when running locally |
 
@@ -660,7 +752,9 @@ Errors are always `{"error": "message for people", "code": "code"}`.
 | `GET /auth/status` | Signed in | The current status and role |
 | `POST /auth/register` | Signed in, no account yet | Submits a display name and unit number, creating an account under review |
 | `GET /announcements`, `GET /announcements/<id>` | Approved | The announcement list; one announcement |
-| `POST /announcements`, `PUT`, `DELETE /announcements/<id>` | Moderator, administrator | Create, edit and delete announcements |
+| `GET /announcements/<id>/images/<picture number>` | Approved | One picture of an announcement |
+| `POST /announcements` | Moderator, administrator | Create an announcement, with up to five pictures |
+| `PUT /announcements/<id>`, `DELETE /announcements/<id>` | Moderator, administrator | Edit and delete an announcement |
 | `GET /posts`, `GET /posts/<id>` | Approved | The post list; one post with its replies |
 | `POST /posts` | Approved | Create a post, with up to five pictures |
 | `GET /posts/<id>/images/<picture number>` | Approved | One picture of a post |
@@ -670,4 +764,6 @@ Errors are always `{"error": "message for people", "code": "code"}`.
 | `GET /documents`, `GET /documents/<file_id>/download` | Approved | The document list; download |
 | `GET /admin/users` | Moderator, administrator | The member list |
 | `PUT /admin/users/<id>` | Moderator, administrator | Change display name, unit number, role and status |
-| `GET /admin/documents` | Moderator, administrator | Where documents are kept and where to add one |
+| `GET /admin/documents` | Moderator, administrator | Whether the admin page can upload documents, and the size limit per file |
+| `POST /admin/documents` | Moderator, administrator | Upload a document: `multipart/form-data`, field name `file`, at most 10 MB. A file with the same name is replaced |
+| `DELETE /admin/documents/<file_id>` | Moderator, administrator | Delete a document |

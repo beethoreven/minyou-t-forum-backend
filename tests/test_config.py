@@ -84,7 +84,7 @@ def test_rejects_a_broken_documents_source(changes, mentions):
 
 
 def test_apps_script_is_optional_and_its_settings_come_as_a_pair():
-    assert load_config(DRIVE_ENV).apps_script_url is None  # 沒設定就是不開放附圖，服務照樣起得來
+    assert load_config(DRIVE_ENV).apps_script_url is None  # 沒設定就是不能從後台上傳，服務照樣起得來
 
     script = {"APPS_SCRIPT_URL": "https://script.google.com/macros/s/abc/exec", "APPS_SCRIPT_SECRET": "long-secret"}
     config = load_config(DRIVE_ENV | script)

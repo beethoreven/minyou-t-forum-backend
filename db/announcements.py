@@ -58,3 +58,29 @@ def delete(conn, announcement_id: int) -> bool:
     """回傳有沒有刪到（False 代表沒有這則公告）。"""
     cursor = conn.execute("DELETE FROM announcements WHERE id = %s", (announcement_id,))
     return cursor.rowcount == 1
+
+
+def add_images(conn, announcement_id: int, file_ids: list[str]) -> None:
+    """記下這則公告的附圖。file_ids 是圖片的代號（見 db/pictures.py），照上傳的順序。"""
+    for file_id in file_ids:
+        conn.execute(
+            "INSERT INTO announcement_images (announcement_id, file_id) VALUES (%s, %s)",
+            (announcement_id, file_id),
+        )
+
+
+def list_images(conn, announcement_id: int) -> list[dict]:
+    """一則公告的附圖，照上傳的順序。"""
+    return conn.execute(
+        "SELECT id, file_id FROM announcement_images WHERE announcement_id = %s ORDER BY id",
+        (announcement_id,),
+    ).fetchall()
+
+
+def get_image_file_id(conn, announcement_id: int, image_id: int) -> str | None:
+    """某一張附圖的代號。這張圖不屬於這則公告就回傳 None。"""
+    row = conn.execute(
+        "SELECT file_id FROM announcement_images WHERE id = %s AND announcement_id = %s",
+        (image_id, announcement_id),
+    ).fetchone()
+    return row["file_id"] if row else None

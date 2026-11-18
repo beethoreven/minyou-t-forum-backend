@@ -59,7 +59,7 @@ def update(conn, post_id: int, title: str, body: str) -> bool:
 
 
 def delete(conn, post_id: int) -> bool:
-    """刪除文章，回覆會跟著一起刪除。回傳有沒有刪到。"""
+    """刪除文章，回覆與附圖的紀錄會跟著一起刪除。回傳有沒有刪到。"""
     cursor = conn.execute("DELETE FROM posts WHERE id = %s", (post_id,))
     return cursor.rowcount == 1
 
@@ -89,7 +89,7 @@ def count_replies_since(conn, author_id: int, seconds: int) -> int:
 
 
 def add_images(conn, post_id: int, file_ids: list[str]) -> None:
-    """記下這篇文章的附圖。file_ids 是圖片存放處給的代號，照上傳的順序。"""
+    """記下這篇文章的附圖。file_ids 是圖片的代號（見 db/pictures.py），照上傳的順序。"""
     for file_id in file_ids:
         conn.execute(
             "INSERT INTO post_images (post_id, file_id) VALUES (%s, %s)",
@@ -106,7 +106,7 @@ def list_images(conn, post_id: int) -> list[dict]:
 
 
 def get_image_file_id(conn, post_id: int, image_id: int) -> str | None:
-    """某一張附圖存放處的代號。這張圖不屬於這篇文章就回傳 None。"""
+    """某一張附圖的代號。這張圖不屬於這篇文章就回傳 None。"""
     row = conn.execute(
         "SELECT file_id FROM post_images WHERE id = %s AND post_id = %s",
         (image_id, post_id),

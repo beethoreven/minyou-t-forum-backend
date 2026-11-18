@@ -42,9 +42,19 @@ def test_json_that_is_not_an_object(client):
 
 
 def test_oversized_request(client):
-    response = client.post("/announcements", json={"title": "標題", "body": "字" * 30_000})
+    created = client.post("/announcements", json={"title": "標題", "body": "內文"}).get_json()
+
+    # 一般的請求最多 64 KB
+    response = client.put(f"/announcements/{created['id']}", json={"title": "標題", "body": "字" * 30_000})
     assert_error(response, 413, "payload_too_large")
-    assert client.get("/announcements").get_json()["items"] == []
+    assert client.get(f"/announcements/{created['id']}").get_json() == created
+
+    # 新增公告與文章時可以附圖，上限放寬到 3 MB；再大一樣擋下來
+    for path in ("/announcements", "/posts"):
+        response = client.post(path, json={"title": "標題", "body": "字" * 1_100_000})
+        assert_error(response, 413, "payload_too_large")
+    assert len(client.get("/announcements").get_json()["items"]) == 1
+    assert client.get("/posts").get_json()["items"] == []
 
 
 def test_unexpected_error_hides_the_details(client, monkeypatch):

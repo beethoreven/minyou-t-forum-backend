@@ -17,26 +17,24 @@ import validation
 from auth_utils import access, guard, sessions
 from auth_utils.google_auth import GoogleIdentity, VerificationUnavailable, make_verifier
 from config import Config, ConfigError, load_config
-from db import announcements, posts, users
+from db import announcements, pictures, posts, users
 from db.connection import connect
 from db.schema import ensure_schema
 from documents.base import DocumentFile, DocumentsUnavailable
 from documents.google_drive import GoogleDriveFolder
 from documents.local_folder import LocalFolder
-from documents.pictures import (
-    DatabasePictures,
-    DrivePictures,
-    LocalPictures,
-    PicturesUnavailable,
-    PictureStores,
-)
 from errors import ApiError, register_error_handlers
 from timeutil import iso_utc
 
 # 內文上限是 10,000 字，中文一個字 3 個位元組，再加上 JSON 的格式，64 KB 夠用。
 MAX_REQUEST_BYTES = 64 * 1024
-# 發文章可以附圖（最多 5 張、每張最多 300 KB，編碼後會再大三分之一），所以這一個路由放寬到 3 MB。
-MAX_POST_BYTES = 3 * 1024 * 1024
+# 新增公告與文章時可以附圖（最多 5 張、每張最多 300 KB，編碼後會再大三分之一），
+# 所以這兩個路由放寬到 3 MB。
+MAX_ENTRY_BYTES = 3 * 1024 * 1024
+# 後台上傳的文檔，一個檔案最大多少。
+MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+# 上傳檔案的請求除了檔案本身，還有表單的分隔字串與檔名，所以整個請求的上限要多留一點。
+UPLOAD_OVERHEAD_BYTES = 64 * 1024
 
 
 class IdConverter(BaseConverter):
@@ -58,7 +56,7 @@ def create_app(
     """建立 app。verify_google_token 只給測試用，用來換掉真的 Google 驗證。"""
     config = config or load_config()
     verify_google_token = verify_google_token or make_verifier(config.google_client_id)
-    documents, pictures = _sources(config)
+    documents = _documents(config)
 
     app = Flask(__name__)
     app.url_map.converters["id"] = IdConverter
@@ -104,8 +102,6 @@ def create_app(
             "email": email,
             "state": state,
             "authorized": state == "approved",
-            # 這個服務現在能不能附圖。不能的話，web 不顯示選圖片的按鈕。
-            "can_attach_pictures": pictures is not None,
             "user": user and {
                 "id": user["id"],
                 "display_name": user["display_name"],
@@ -135,26 +131,35 @@ def create_app(
             "created_at": iso_utc(row["created_at"]),
         }
 
+    def images_json(rows: list[dict]) -> list[dict]:
+        # 只給編號。圖片本身要另外用 GET …/images/<編號> 拿，一樣要登入。
+        return [{"id": row["id"]} for row in rows]
+
+    def announcement_json(conn, row: dict) -> dict:
+        images = announcements.list_images(conn, row["id"])
+        return entry_json(row) | {"images": images_json(images)}
+
     def post_json(conn, row: dict) -> dict:
         replies = posts.list_replies(conn, row["id"])
         images = posts.list_images(conn, row["id"])
         return entry_json(row) | {
-            # 只給編號。圖片本身要另外用 GET /posts/<文章>/images/<編號> 拿，一樣要登入。
-            "images": [{"id": image["id"]} for image in images],
+            "images": images_json(images),
             "replies": [reply_json(reply) for reply in replies],
         }
 
-    def save_pictures(images: list[bytes]) -> list[str]:
-        """把附圖存起來，回傳每一張存放處的代號。"""
-        if not images:
-            return []
-        if pictures is None:
-            raise ApiError(503, "pictures_unavailable", "目前不能附圖")
-        try:
-            return pictures.save(images)
-        except PicturesUnavailable:
-            app.logger.exception("圖片存不進去")
-            raise ApiError(503, "pictures_unavailable", "圖片上傳失敗，請稍後再試") from None
+    def picture_response(content: bytes | None) -> Response:
+        if content is None:
+            raise ApiError(404, "image_not_found", "找不到這張圖片")
+        return Response(
+            content,
+            mimetype="image/jpeg",
+            headers={
+                # 一張圖存進去之後就不會再變，瀏覽器可以一直留著，不用每次重新抓。
+                "Cache-Control": "private, max-age=31536000, immutable",
+                # 一律當成圖片處理，瀏覽器不要自己猜它是不是別種檔案。
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     def member_json(row: dict) -> dict:
         """後台看到的成員資料。"""
@@ -177,10 +182,20 @@ def create_app(
         }
 
     def entry_input() -> tuple[str, str]:
+        """修改公告或文章時送來的內容：標題與內文。附圖發出去之後就不能換。"""
         data = validation.json_object(request)
         title = validation.text_field(data, "title", "標題", validation.TITLE_MAX)
         body = validation.text_field(data, "body", "內文", validation.BODY_MAX)
         return title, body
+
+    def new_entry_input() -> tuple[str, str, list[bytes]]:
+        """新增公告或文章時送來的內容：標題、內文，以及附圖（可以沒有）。"""
+        # 要在讀請求的內容之前放寬，放寬的只有這一個請求。
+        request.max_content_length = MAX_ENTRY_BYTES
+        data = validation.json_object(request)
+        title = validation.text_field(data, "title", "標題", validation.TITLE_MAX)
+        body = validation.text_field(data, "body", "內文", validation.BODY_MAX)
+        return title, body, validation.images_field(data)
 
     def announcement_not_found() -> ApiError:
         return ApiError(404, "announcement_not_found", "找不到這則公告，可能已經被刪除")
@@ -188,9 +203,21 @@ def create_app(
     def post_not_found() -> ApiError:
         return ApiError(404, "post_not_found", "找不到這篇文章，可能已經被刪除")
 
+    def document_not_found() -> ApiError:
+        return ApiError(404, "document_not_found", "找不到這份文件，可能已經被移除")
+
     def documents_unavailable() -> ApiError:
         app.logger.exception("讀不到文件")
         return ApiError(503, "documents_unavailable", "暫時讀不到文件，請稍後再試")
+
+    def documents_not_writable(error: DocumentsUnavailable) -> ApiError:
+        """上傳或刪除文檔沒有成功。設定不對的時候，把該檢查什麼告訴後台的人（error.hint）。"""
+        app.logger.exception("文檔寫不進去")
+        message = error.hint or "暫時連不上存放文檔的地方，請稍後再試"
+        return ApiError(503, "documents_unavailable", message)
+
+    def upload_unavailable() -> ApiError:
+        return ApiError(503, "upload_unavailable", "還沒有開啟從後台上傳的功能")
 
     # ── 保活 ────────────────────────────────────────────────
 
@@ -279,18 +306,27 @@ def create_app(
         with db() as conn:
             member(conn)
             row = announcements.get(conn, announcement_id)
-        if row is None:
-            raise announcement_not_found()
-        return entry_json(row)
+            if row is None:
+                raise announcement_not_found()
+            return announcement_json(conn, row)
 
     @app.post("/announcements")
     def create_announcement():
         with db() as conn:
             author = staff(conn)
-            title, body = entry_input()
+            title, body, images = new_entry_input()
+            # 公告、圖片、兩者的對應在同一筆交易裡寫入：要嘛全部成功，要嘛什麼都沒有留下。
             new_id = announcements.create(conn, title, body, author["id"])
-            row = announcements.get(conn, new_id)
-        return entry_json(row), 201
+            announcements.add_images(conn, new_id, pictures.save(conn, images))
+            return announcement_json(conn, announcements.get(conn, new_id)), 201
+
+    @app.get("/announcements/<id:announcement_id>/images/<id:image_id>")
+    def get_announcement_image(announcement_id: int, image_id: int):
+        with db() as conn:
+            member(conn)
+            file_id = announcements.get_image_file_id(conn, announcement_id, image_id)
+            content = pictures.get(conn, file_id) if file_id else None
+        return picture_response(content)
 
     @app.put("/announcements/<id:announcement_id>")
     def update_announcement(announcement_id: int):
@@ -299,15 +335,17 @@ def create_app(
             title, body = entry_input()
             if not announcements.update(conn, announcement_id, title, body):
                 raise announcement_not_found()
-            row = announcements.get(conn, announcement_id)
-        return entry_json(row)
+            return announcement_json(conn, announcements.get(conn, announcement_id))
 
     @app.delete("/announcements/<id:announcement_id>")
     def delete_announcement(announcement_id: int):
         with db() as conn:
             staff(conn)
+            images = announcements.list_images(conn, announcement_id)
             if not announcements.delete(conn, announcement_id):
                 raise announcement_not_found()
+            # 「哪一張圖屬於這則公告」的紀錄會跟著公告一起刪除，圖片的內容要自己刪。
+            pictures.delete(conn, [image["file_id"] for image in images])
         return "", 204
 
     # ── 社區論壇：成員都能看、發文、回覆；改與刪要是作者本人、版主或管理員 ──
@@ -341,7 +379,6 @@ def create_app(
 
     @app.post("/posts")
     def create_post():
-        request.max_content_length = MAX_POST_BYTES
         with db() as conn:
             author = member(conn)
             if author["role"] != "admin":
@@ -350,52 +387,19 @@ def create_app(
                     guard.POST_LIMITS,
                     "篇文章",
                 )
-
-        data = validation.json_object(request)
-        title = validation.text_field(data, "title", "標題", validation.TITLE_MAX)
-        body = validation.text_field(data, "body", "內文", validation.BODY_MAX)
-        images = validation.images_field(data)
-
-        # 存圖要連到外面的服務，可能要好幾秒。先把上面那條資料庫連線還回去再做，
-        # 不要讓連線在等待的期間一直被佔著。
-        file_ids = save_pictures(images)
-        try:
-            with db() as conn:
-                new_id = posts.create(conn, title, body, author["id"])
-                posts.add_images(conn, new_id, file_ids)
-                result = post_json(conn, posts.get(conn, new_id))
-        except Exception:
-            # 文章沒有建立成功，剛剛存好的圖片就沒有人用了，順手清掉。
-            if file_ids:
-                pictures.delete(file_ids)
-            raise
-        return result, 201
+            title, body, images = new_entry_input()
+            # 文章、圖片、兩者的對應在同一筆交易裡寫入：要嘛全部成功，要嘛什麼都沒有留下。
+            new_id = posts.create(conn, title, body, author["id"])
+            posts.add_images(conn, new_id, pictures.save(conn, images))
+            return post_json(conn, posts.get(conn, new_id)), 201
 
     @app.get("/posts/<id:post_id>/images/<id:image_id>")
     def get_post_image(post_id: int, image_id: int):
         with db() as conn:
             member(conn)
             file_id = posts.get_image_file_id(conn, post_id, image_id)
-        not_found = ApiError(404, "image_not_found", "找不到這張圖片")
-        if file_id is None or pictures is None:
-            raise not_found
-        try:
-            chunks = pictures.open(file_id)
-        except PicturesUnavailable:
-            app.logger.exception("讀不到圖片")
-            raise ApiError(503, "pictures_unavailable", "暫時讀不到圖片，請稍後再試") from None
-        if chunks is None:
-            raise not_found
-        return Response(
-            chunks,
-            mimetype="image/jpeg",
-            headers={
-                # 一張圖存進去之後就不會再變，瀏覽器可以一直留著，不用每次重新抓。
-                "Cache-Control": "private, max-age=31536000, immutable",
-                # 一律當成圖片處理，瀏覽器不要自己猜它是不是別種檔案。
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
+            content = pictures.get(conn, file_id) if file_id else None
+        return picture_response(content)
 
     @app.put("/posts/<id:post_id>")
     def update_post(post_id: int):
@@ -417,11 +421,10 @@ def create_app(
             if row is None:
                 raise post_not_found()
             access.require_owner_or_staff(user, row["author_id"])
-            file_ids = [image["file_id"] for image in posts.list_images(conn, post_id)]
+            images = posts.list_images(conn, post_id)
             posts.delete(conn, post_id)
-        # 文章確定刪掉之後才刪圖片。圖片刪不掉不算錯，只是存放處多留幾個沒人用的檔案。
-        if file_ids and pictures is not None:
-            pictures.delete(file_ids)
+            # 「哪一張圖屬於這篇文章」的紀錄會跟著文章一起刪除，圖片的內容要自己刪。
+            pictures.delete(conn, [image["file_id"] for image in images])
         return "", 204
 
     @app.post("/posts/<id:post_id>/replies")
@@ -474,7 +477,7 @@ def create_app(
         except DocumentsUnavailable:
             raise documents_unavailable() from None
         if opened is None:
-            raise ApiError(404, "document_not_found", "找不到這份文件，可能已經被移除")
+            raise document_not_found()
         file, chunks = opened
         # 檔名可能有中文。用 filename*=UTF-8'' 的寫法，而且整個檔名都編碼過，
         # 檔名裡就算有換行或引號，也不會跑出這個標頭。
@@ -489,10 +492,49 @@ def create_app(
 
     @app.get("/admin/documents")
     def admin_documents():
-        """文件放在哪裡、要去哪裡新增。文件的新增與刪除不經過論壇，見 documents/base.py。"""
+        """後台管理文檔前要知道的事：能不能從後台上傳、一個檔案最大多少。
+
+        文檔放 Google Drive、卻還沒設定代為存檔的 Apps Script 時不能上傳（can_upload 是 false）。
+        這時後台改成請人直接去 Google Drive 的資料夾放檔案，manage_url 就是那個資料夾的網址。
+        """
         with db() as conn:
             staff(conn)
-        return documents.manage_info()
+        return {
+            "can_upload": documents.can_upload,
+            "max_bytes": MAX_DOCUMENT_BYTES,
+            "manage_url": documents.manage_url,
+        }
+
+    @app.post("/admin/documents")
+    def upload_document():
+        """上傳一份文檔。已經有同名的檔案時，新的會取代舊的。"""
+        # 要在讀請求的內容之前放寬，放寬的只有這一個請求。
+        request.max_content_length = MAX_DOCUMENT_BYTES + UPLOAD_OVERHEAD_BYTES
+        with db() as conn:
+            staff(conn)
+        if not documents.can_upload:
+            raise upload_unavailable()
+        name, content = validation.uploaded_file(request, MAX_DOCUMENT_BYTES)
+        # 存檔可能要連到外面的服務、等上好幾秒，所以不在資料庫連線開著的時候做。
+        try:
+            documents.save(name, content)
+        except DocumentsUnavailable as error:
+            raise documents_not_writable(error) from None
+        return {"name": name}, 201
+
+    @app.delete("/admin/documents/<file_id>")
+    def delete_document(file_id: str):
+        with db() as conn:
+            staff(conn)
+        if not documents.can_upload:
+            raise upload_unavailable()
+        try:
+            deleted = documents.delete(file_id)
+        except DocumentsUnavailable as error:
+            raise documents_not_writable(error) from None
+        if not deleted:
+            raise document_not_found()
+        return "", 204
 
     @app.get("/admin/users")
     def admin_list_users():
@@ -529,27 +571,20 @@ def create_app(
     return app
 
 
-def _sources(config: Config):
-    """社區文檔與文章附圖放在哪裡。回傳（文檔的來源, 附圖的存放處）。
-
-    設定了本機資料夾就都用它（本機開發與測試）。
-
-    否則文檔讀 Google Drive。附圖預設存資料庫：論壇的服務帳號沒辦法把檔案寫進個人的
-    Google Drive。有設定代為存圖的 Apps Script 時，新的附圖才改存 Google Drive 的 Pic 資料夾。
-    """
+def _documents(config: Config):
+    """社區文檔放在哪裡：設定了本機資料夾就用它（本機開發與測試），否則是 Google Drive 的資料夾。"""
     if config.documents_dir is not None:
         config.documents_dir.mkdir(parents=True, exist_ok=True)
-        return LocalFolder(config.documents_dir), LocalPictures(config.documents_dir)
+        return LocalFolder(config.documents_dir)
     try:
-        folder = GoogleDriveFolder.from_service_account(
-            config.service_account_info, config.drive_folder_id
+        return GoogleDriveFolder.from_service_account(
+            config.service_account_info,
+            config.drive_folder_id,
+            script_url=config.apps_script_url,
+            script_secret=config.apps_script_secret,
         )
     except ValueError:
         raise ConfigError("SERVICE_ACCOUNT_JSON 的金鑰讀不進來，請重新下載金鑰檔再貼一次。") from None
-    database = DatabasePictures(config.database_url)
-    drive = DrivePictures(folder.session, config.apps_script_url, config.apps_script_secret)
-    writer = drive if config.apps_script_url else database
-    return folder, PictureStores(writer=writer, database=database, drive=drive)
 
 
 def main() -> None:

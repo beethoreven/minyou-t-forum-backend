@@ -69,7 +69,7 @@ STATEMENTS = (
     """,
     # 「某一篇文章的所有回覆」是最常用的查詢，幫它建索引。
     "CREATE INDEX IF NOT EXISTS replies_post_id_idx ON replies (post_id)",
-    # 文章的附圖。圖片本身不在資料庫裡，這裡只記它存放處的代號（file_id）。
+    # 文章的附圖：哪一張圖屬於哪一篇文章。圖片的內容在 stored_pictures，這裡只記它的代號（file_id）。
     # 文章被刪除時，這裡的紀錄一起刪除。
     """
     CREATE TABLE IF NOT EXISTS post_images (
@@ -80,7 +80,20 @@ STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS post_images_post_id_idx ON post_images (post_id)",
-    # 存在資料庫裡的圖片本身。post_images.file_id 是 db: 開頭的，內容就在這張表。
+    # 公告的附圖，跟文章的附圖是同一種做法。
+    """
+    CREATE TABLE IF NOT EXISTS announcement_images (
+        id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        announcement_id bigint NOT NULL REFERENCES announcements (id) ON DELETE CASCADE,
+        file_id         text NOT NULL,
+        created_at      timestamptz NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS announcement_images_announcement_id_idx
+        ON announcement_images (announcement_id)
+    """,
+    # 附圖的內容。上面兩張表的 file_id 指的就是這裡的 id。
     # 圖片上傳前已經縮小過，一張只有幾十 KB。
     """
     CREATE TABLE IF NOT EXISTS stored_pictures (

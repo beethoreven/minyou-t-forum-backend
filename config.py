@@ -35,7 +35,8 @@ class Config:
     documents_dir: Path | None = None
     service_account_info: dict | None = field(default=None, repr=False)
     drive_folder_id: str | None = None
-    # 文件放 Google Drive 時，文章的附圖要靠一支 Apps Script 代為存檔。沒設定就不能附圖。
+    # 文檔放 Google Drive 時，從後台上傳與刪除要靠一支 Apps Script 代勞。
+    # 沒設定的話文檔照樣讀得到，只是不能從後台上傳。
     apps_script_url: str | None = None
     apps_script_secret: str | None = field(default=None, repr=False)
     session_idle_days: int = DEFAULT_SESSION_IDLE_DAYS
@@ -162,7 +163,10 @@ def _documents_source(env: Mapping[str, str]) -> dict:
 
 
 def _apps_script(env: Mapping[str, str]) -> dict:
-    """代為存圖的 Apps Script。兩個設定要嘛都填，要嘛都不填（不填就是不開放附圖）。"""
+    """代為把文檔存進 Google Drive 的 Apps Script。
+
+    兩個設定要嘛都填，要嘛都不填（不填就是不能從後台上傳文檔）。
+    """
     url = _value(env, "APPS_SCRIPT_URL")
     secret = _value(env, "APPS_SCRIPT_SECRET")
     if not url and not secret:

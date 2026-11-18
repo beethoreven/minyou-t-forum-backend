@@ -1,16 +1,33 @@
-"""社區文檔的 API：文件清單與下載。"""
+"""社區文檔的 API：文件清單、下載，以及後台的上傳與刪除。測試用本機資料夾放文檔。"""
 
+import io
 import os
 from urllib.parse import quote
+
+import pytest
+
+from documents.base import DocumentsUnavailable
+from documents.local_folder import LocalFolder
+
+PDF = b"%PDF-1.7 fake content \x00\x01\x02"
+
+
+def upload(client, name, content=PDF):
+    """照瀏覽器上傳檔案的格式（multipart/form-data）送出一個檔案。"""
+    return client.post(
+        "/admin/documents",
+        data={"file": (io.BytesIO(content), name)},
+        content_type="multipart/form-data",
+    )
+
+
+def listed(client) -> dict:
+    """現在的文件清單：{檔名: 代號}。"""
+    return {item["name"]: item["id"] for item in client.get("/documents").get_json()["items"]}
 
 
 def test_empty_folder(client):
     assert client.get("/documents").get_json() == {"items": []}
-
-
-def test_admin_page_is_told_where_documents_live(client, documents_dir):
-    info = client.get("/admin/documents").get_json()
-    assert info == {"source": "local_folder", "manage_url": None, "location": str(documents_dir)}
 
 
 def test_lists_only_regular_files_sorted_by_name(client, documents_dir):
@@ -100,3 +117,157 @@ def test_unreadable_folder_is_503(client, documents_dir):
         response = client.get(path)
         assert response.status_code == 503, path
         assert response.get_json()["code"] == "documents_unavailable"
+
+
+# ── 後台：上傳與刪除 ─────────────────────────────────────
+
+
+def test_admin_page_is_told_whether_it_can_upload(client):
+    info = client.get("/admin/documents").get_json()
+    assert info == {"can_upload": True, "max_bytes": 10 * 1024 * 1024, "manage_url": None}
+
+
+def test_upload_then_download(client, documents_dir):
+    response = upload(client, "社區公約.pdf")
+    assert response.status_code == 201
+    assert response.get_json() == {"name": "社區公約.pdf"}
+    assert (documents_dir / "社區公約.pdf").read_bytes() == PDF
+
+    file_id = listed(client)["社區公約.pdf"]
+    download = client.get(f"/documents/{file_id}/download")
+    assert download.data == PDF
+    download.close()
+    # 上傳時用的暫存檔不會留下來
+    assert [entry.name for entry in documents_dir.iterdir()] == ["社區公約.pdf"]
+
+
+def test_uploading_the_same_name_replaces_the_old_file(client, documents_dir):
+    upload(client, "社區公約.pdf", b"old version")
+    assert upload(client, "社區公約.pdf", b"new version").status_code == 201
+
+    assert list(listed(client)) == ["社區公約.pdf"]
+    assert (documents_dir / "社區公約.pdf").read_bytes() == b"new version"
+
+
+def test_delete(client, documents_dir):
+    upload(client, "社區公約.pdf")
+    upload(client, "管理辦法.pdf")
+    file_id = listed(client)["社區公約.pdf"]
+
+    response = client.delete(f"/admin/documents/{file_id}")
+    assert response.status_code == 204
+    assert list(listed(client)) == ["管理辦法.pdf"]
+    assert not (documents_dir / "社區公約.pdf").exists()
+
+    again = client.delete(f"/admin/documents/{file_id}")
+    assert again.status_code == 404
+    assert again.get_json()["code"] == "document_not_found"
+
+
+def test_only_staff_can_upload_and_delete(client, add_member, documents_dir):
+    resident = add_member("resident@example.com")
+    moderator = add_member("moderator@example.com", role="moderator")
+    upload(client, "社區公約.pdf")
+    file_id = listed(client)["社區公約.pdf"]
+
+    for response in (
+        upload(resident, "偷放的.pdf"),
+        resident.delete(f"/admin/documents/{file_id}"),
+        resident.get("/admin/documents"),
+    ):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == "forbidden"
+    assert list(listed(client)) == ["社區公約.pdf"]  # 什麼都沒有變
+
+    assert upload(moderator, "版主放的.pdf").status_code == 201
+    assert moderator.delete(f"/admin/documents/{file_id}").status_code == 204
+
+
+def test_upload_needs_a_session(anonymous, documents_dir):
+    assert upload(anonymous, "社區公約.pdf").status_code == 401
+    assert list(documents_dir.iterdir()) == []
+
+
+def test_a_path_in_the_file_name_is_dropped(client, documents_dir, tmp_path):
+    for sent in ("../../outside.txt", "/etc/outside.txt", "a/b/../outside.txt"):
+        assert upload(client, sent).get_json() == {"name": "outside.txt"}
+    assert [entry.name for entry in documents_dir.iterdir()] == ["outside.txt"]
+    assert not (tmp_path / "outside.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "name, content, code",
+    [
+        (".hidden", PDF, "file_name_invalid"),
+        ("..", PDF, "file_name_invalid"),
+        ("   ", PDF, "file_name_invalid"),
+        ("響鈴\x07.pdf", PDF, "file_name_invalid"),
+        ("長" * 101, PDF, "file_name_too_long"),
+        ("空的.pdf", b"", "file_empty"),
+    ],
+)
+def test_rejects_bad_uploads(client, documents_dir, name, content, code):
+    response = upload(client, name, content)
+    assert response.status_code == 400
+    assert response.get_json()["code"] == code
+    assert list(documents_dir.iterdir()) == []
+
+
+def test_upload_without_a_file(client):
+    for response in (
+        client.post("/admin/documents", data={}, content_type="multipart/form-data"),
+        client.post("/admin/documents", json={"file": "不是檔案"}),
+    ):
+        assert response.status_code == 400
+        assert response.get_json()["code"] == "file_required"
+
+
+def test_upload_size_limit(client, documents_dir, monkeypatch):
+    monkeypatch.setattr("app.MAX_DOCUMENT_BYTES", 20)
+
+    assert upload(client, "剛好.pdf", b"x" * 20).status_code == 201
+    too_large = upload(client, "超過.pdf", b"x" * 21)
+    assert too_large.status_code == 413
+    assert too_large.get_json()["code"] == "file_too_large"
+    assert [entry.name for entry in documents_dir.iterdir()] == ["剛好.pdf"]
+
+    # 大到連整個請求都超過上限的，還沒讀檔案就會被擋下來
+    monkeypatch.setattr("app.UPLOAD_OVERHEAD_BYTES", 500)
+    huge = upload(client, "太大.pdf", b"x" * 5000)
+    assert huge.status_code == 413
+    assert huge.get_json()["code"] == "payload_too_large"
+
+
+def test_a_long_chinese_name_at_the_limit_is_fine(client):
+    name = "長" * 96 + ".pdf"
+    assert upload(client, name).get_json() == {"name": name}
+
+
+def test_upload_and_delete_are_refused_when_the_source_is_read_only(client, documents_dir, monkeypatch):
+    (documents_dir / "社區公約.pdf").write_bytes(PDF)
+    file_id = listed(client)["社區公約.pdf"]
+    monkeypatch.setattr(LocalFolder, "can_upload", False)
+
+    assert client.get("/admin/documents").get_json()["can_upload"] is False
+    for response in (upload(client, "新的.pdf"), client.delete(f"/admin/documents/{file_id}")):
+        assert response.status_code == 503
+        assert response.get_json()["code"] == "upload_unavailable"
+    assert list(listed(client)) == ["社區公約.pdf"]
+
+
+def test_a_failed_upload_tells_staff_what_to_check(client, monkeypatch):
+    def misconfigured(self, name, content):
+        raise DocumentsUnavailable("只進 log 的細節", hint="請檢查某一項設定")
+
+    monkeypatch.setattr(LocalFolder, "save", misconfigured)
+    response = upload(client, "社區公約.pdf")
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "請檢查某一項設定", "code": "documents_unavailable"}
+
+    def down(self, name, content):
+        raise DocumentsUnavailable("只進 log 的細節")
+
+    monkeypatch.setattr(LocalFolder, "save", down)
+    response = upload(client, "社區公約.pdf")
+    assert response.status_code == 503
+    assert "只進 log 的細節" not in response.get_data(as_text=True)
