@@ -1,7 +1,8 @@
 """這個請求是誰發的、他可以做什麼。
 
 畫面上把按鈕藏起來只是顯示效果，任何人都可以不經過畫面直接呼叫 API。
-真正的把關在這裡：每一個要保護的路由，都要先呼叫 require_member 或 require_staff。
+真正的把關在這裡：每一個要保護的路由，都要先查出是誰（current_account），
+再呼叫 require_member 或 require_staff。app.py 把這兩步包成 member(conn)、staff(conn)。
 
 檢查分三層，前一層過了才看下一層：
 
@@ -52,12 +53,12 @@ def current_account(conn, request: Request, idle_days: int) -> Account:
     return Account(email=email, user=users.get_by_email(conn, email))
 
 
-def require_member(conn, request: Request, idle_days: int) -> dict:
+def require_member(account: Account) -> dict:
     """第二層：已審核。回傳這位成員的資料。
 
     三種不通過的情況都回 403，用代碼分開，畫面才知道該顯示註冊表單、審核中，還是已停用。
     """
-    user = current_account(conn, request, idle_days).user
+    user = account.user
     if user is None:
         raise ApiError(403, "unregistered", "還沒有完成註冊")
     if user["status"] == "pending":
@@ -67,9 +68,9 @@ def require_member(conn, request: Request, idle_days: int) -> dict:
     return user
 
 
-def require_staff(conn, request: Request, idle_days: int) -> dict:
+def require_staff(account: Account) -> dict:
     """第三層：版主或管理員。"""
-    user = require_member(conn, request, idle_days)
+    user = require_member(account)
     if not is_staff(user):
         raise ApiError(403, "forbidden", "權限不足")
     return user

@@ -64,6 +64,30 @@ def delete(conn, post_id: int) -> bool:
     return cursor.rowcount == 1
 
 
+def count_posts_since(conn, author_id: int, seconds: int) -> int:
+    """這個人在最近這段時間內發了幾篇文章。限制發文數量用。"""
+    row = conn.execute(
+        """
+        SELECT count(*) AS total FROM posts
+        WHERE author_id = %s AND created_at > now() - make_interval(secs => %s)
+        """,
+        (author_id, seconds),
+    ).fetchone()
+    return row["total"]
+
+
+def count_replies_since(conn, author_id: int, seconds: int) -> int:
+    """這個人在最近這段時間內發了幾則回覆。"""
+    row = conn.execute(
+        """
+        SELECT count(*) AS total FROM replies
+        WHERE author_id = %s AND created_at > now() - make_interval(secs => %s)
+        """,
+        (author_id, seconds),
+    ).fetchone()
+    return row["total"]
+
+
 def add_images(conn, post_id: int, file_ids: list[str]) -> None:
     """記下這篇文章的附圖。file_ids 是圖片存放處給的代號，照上傳的順序。"""
     for file_id in file_ids:

@@ -14,7 +14,7 @@ from flask_cors import CORS
 from werkzeug.routing import BaseConverter
 
 import validation
-from auth_utils import access, sessions
+from auth_utils import access, guard, sessions
 from auth_utils.google_auth import GoogleIdentity, VerificationUnavailable, make_verifier
 from config import Config, ConfigError, load_config
 from db import announcements, posts, users
@@ -73,11 +73,26 @@ def create_app(
     def db() -> psycopg.Connection:
         return connect(config.database_url)
 
+    # 每個帳號每分鐘能送幾個請求（規則在 auth_utils/guard.py）。
+    limiter = guard.RateLimiter(guard.REQUESTS_PER_MINUTE, guard.WINDOW_SECONDS)
+    app.extensions["rate_limiter"] = limiter
+
+    def signed_in(conn) -> access.Account:
+        """這個請求是誰發的。每個帶登入憑證的請求都會經過這裡，所以順便在這裡算他的請求數。"""
+        account = access.current_account(conn, request, config.session_idle_days)
+        # 管理員不限：唯一的管理員如果被擋在外面，就沒有人能處理了。
+        is_admin = account.user is not None and account.user["role"] == "admin"
+        if not is_admin:
+            retry_after = limiter.hit(account.email)
+            if retry_after is not None:
+                raise guard.rate_limited(retry_after)
+        return account
+
     def member(conn) -> dict:
-        return access.require_member(conn, request, config.session_idle_days)
+        return access.require_member(signed_in(conn))
 
     def staff(conn) -> dict:
-        return access.require_staff(conn, request, config.session_idle_days)
+        return access.require_staff(signed_in(conn))
 
     # ── 回應的格式 ──────────────────────────────────────────
 
@@ -209,6 +224,7 @@ def create_app(
                 users.ensure_first_admin(conn, identity.email, identity.name)
             sessions.delete_idle(conn, config.session_idle_days)
             token = sessions.create(conn, identity.email)
+            sessions.trim(conn, identity.email, guard.MAX_SESSIONS_PER_ACCOUNT)
             account = account_json(identity.email, users.get_by_email(conn, identity.email))
         return {"session_token": token, "google_name": identity.name} | account
 
@@ -225,7 +241,7 @@ def create_app(
         """登入的人現在的狀態。憑證有效就回 200（包含還沒註冊、審核中、已停用），
         憑證無效才回 401：「查過了，結果是不能用」是正常的答案，不是錯誤。"""
         with db() as conn:
-            account = access.current_account(conn, request, config.session_idle_days)
+            account = signed_in(conn)
         return account_json(account.email, account.user)
 
     @app.post("/auth/register")
@@ -235,7 +251,7 @@ def create_app(
         email 取自登入憑證，不看請求裡送來的任何 email：身分只認 Google 驗過的那一個。
         """
         with db() as conn:
-            account = access.current_account(conn, request, config.session_idle_days)
+            account = signed_in(conn)
             data = validation.json_object(request)
             display_name = validation.text_field(data, "display_name", "顯示名稱", validation.NAME_MAX)
             unit_no = validation.text_field(data, "unit_no", "戶號", validation.UNIT_MAX)
@@ -328,6 +344,12 @@ def create_app(
         request.max_content_length = MAX_POST_BYTES
         with db() as conn:
             author = member(conn)
+            if author["role"] != "admin":
+                guard.check_write_limits(
+                    lambda seconds: posts.count_posts_since(conn, author["id"], seconds),
+                    guard.POST_LIMITS,
+                    "篇文章",
+                )
 
         data = validation.json_object(request)
         title = validation.text_field(data, "title", "標題", validation.TITLE_MAX)
@@ -406,6 +428,12 @@ def create_app(
     def create_reply(post_id: int):
         with db() as conn:
             author = member(conn)
+            if author["role"] != "admin":
+                guard.check_write_limits(
+                    lambda seconds: posts.count_replies_since(conn, author["id"], seconds),
+                    guard.REPLY_LIMITS,
+                    "則回覆",
+                )
             data = validation.json_object(request)
             body = validation.text_field(data, "body", "回覆", validation.REPLY_MAX)
             reply_id = posts.create_reply(conn, post_id, body, author["id"])

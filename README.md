@@ -98,6 +98,23 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 - 誰都不能改自己的角色與狀態。唯一的管理員如果把自己降級或停用，就沒有人能改回來了。
 - 設定 `FIRST_ADMIN_EMAIL` 指定的帳號，每次登入都會被設回已審核的管理員。它不經過審核，也不會被別人鎖在外面。
 
+### 怎麼擋住狂打 API、狂發文章
+
+限制都是每個帳號各算各的（`auth_utils/guard.py`）。全站一起算的話，一個人亂來會害所有人一起被擋。
+
+| 限制 | 數字 | 怎麼算 |
+|---|---|---|
+| 請求的頻率 | 每分鐘 120 個請求 | 記在記憶體，每個帶登入憑證的請求算一次 |
+| 發文章 | 10 分鐘 5 篇、一天 30 篇 | 數資料庫裡他最近發了幾篇 |
+| 回覆 | 10 分鐘 20 則、一天 200 則 | 同上 |
+| 登入憑證 | 一個帳號最多留 10 張 | 登入時把最舊的作廢 |
+
+- 超過就回 429，並說明多久之後可以再試。被限制只是暫時不能操作，不會被停用；要停用一個帳號，由版主或管理員在後台做。
+- 請求的頻率記在記憶體，不進資料庫：每個請求都會經過這一關，為了省資源而每次寫一筆資料，反而花更多資源。服務重啟時計數歸零，那只是重新開始算一分鐘。代價是服務只能跑一個行程。
+- 發文的數量直接數資料庫，不另外記帳，所以服務重啟也不會被重設。
+- 管理員不受請求頻率與發文數量的限制：唯一的管理員如果被系統擋在外面，就沒有人能處理了。
+- 沒有登入的請求不在這裡算。它們碰不到任何資料，在第一關就被擋下（401）。
+
 ### 內文為什麼只存純文字
 
 公告、文章、回覆的內文原樣存進資料庫，後端不轉換、不跳脫。前端顯示時一律當成文字放進頁面，不當成 HTML，所以使用者打的 `<script>` 只會原樣顯示出來，不會被執行。
@@ -162,6 +179,7 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | `auth_utils/google_auth.py` | 驗證 Google 的 ID Token |
 | `auth_utils/sessions.py` | 論壇自己的登入憑證 |
 | `auth_utils/access.py` | 權限規則 |
+| `auth_utils/guard.py` | 防濫用：請求頻率、發文數量、登入憑證數量的限制 |
 | `db/` | 連線、建表（`schema.py`）、各資料表的讀寫 |
 | `documents/` | 文件清單與下載：`google_drive.py`、`local_folder.py`；文章附圖的存放：`pictures.py` |
 | `tools/apps_script/pictures.gs` | 代替後端把附圖存進 Google Drive 的 Apps Script |
@@ -171,7 +189,8 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 
 ### 已知限制
 
-- 任何 Google 帳號都能登入並送出註冊。有人亂送時，版主或管理員把他停用即可，沒有另外做防濫用，也沒有頻率限制。
+- 任何 Google 帳號都能登入並送出註冊。有人亂送時，版主或管理員把他停用即可。
+- 頻率與數量的限制只算已經登入的人。沒登入的大量請求（例如對登入那一支狂打）沒有另外擋，要靠主機前面的防護。
 - 沒有資料庫遷移工具。服務啟動時只會建立還不存在的表；要改既有的表，要另外寫 SQL 手動執行。
 - 文件清單每次都向 Google Drive 查，沒有快取。
 - 沒有通知（審核通過不會寄信）、沒有搜尋、沒有操作紀錄。公告不能附圖。
@@ -417,6 +436,23 @@ The admin page has two more safeguards:
 - Nobody can change their own role or status. If the only administrator demoted or disabled themselves, nobody could undo it.
 - The account named by the `FIRST_ADMIN_EMAIL` setting is put back to an approved administrator every time it signs in. It skips review and can never be locked out by someone else.
 
+### How Hammering the API and Flooding Posts Are Stopped
+
+Every limit is counted per account (`auth_utils/guard.py`). Counted site-wide, one person misbehaving would get everyone blocked.
+
+| Limit | Number | How it is counted |
+|---|---|---|
+| Request rate | 120 requests per minute | Kept in memory; every request carrying a session token counts once |
+| Posts | 5 per 10 minutes, 30 per day | Counts the person's recent posts in the database |
+| Replies | 20 per 10 minutes, 200 per day | Same |
+| Session tokens | At most 10 per account | The oldest are invalidated at sign-in |
+
+- Going over returns 429 and says how long to wait. Being limited only blocks the action for a while; it never disables the account. Disabling an account is done by a moderator or administrator on the admin page.
+- The request rate is kept in memory, not in the database: every request passes through this gate, and writing a row each time to save resources would cost more. A restart resets the counts, which only starts a fresh minute. The cost is that the service can run only one process.
+- Post counts come straight from the database with no separate bookkeeping, so a restart doesn't reset them.
+- Administrators are exempt from the request-rate and posting limits: if the only administrator were locked out by the system, nobody could deal with it.
+- Requests without a session aren't counted here. They can't reach any data and are stopped at the first gate (401).
+
 ### Why Bodies Are Stored as Plain Text
 
 The body of an announcement, post or reply is stored exactly as typed; the backend neither converts nor escapes it. The frontend always inserts it into the page as text, never as HTML, so a `<script>` typed by a user is simply displayed, not executed.
@@ -481,6 +517,7 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 | `auth_utils/google_auth.py` | Verifies Google's ID Token |
 | `auth_utils/sessions.py` | The forum's own session tokens |
 | `auth_utils/access.py` | Permission rules |
+| `auth_utils/guard.py` | Abuse limits: request rate, posting counts, session token count |
 | `db/` | Connection, table creation (`schema.py`), and reads and writes per table |
 | `documents/` | Document listing and download: `google_drive.py`, `local_folder.py`; post picture storage: `pictures.py` |
 | `tools/apps_script/pictures.gs` | The Apps Script that saves pictures into Google Drive on the backend's behalf |
@@ -490,7 +527,8 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 
 ### Known Limitations
 
-- Any Google account can sign in and submit a registration. If someone abuses it, a moderator or administrator disables them; there is no further abuse protection and no rate limiting.
+- Any Google account can sign in and submit a registration. If someone abuses it, a moderator or administrator disables them.
+- The rate and count limits apply only to signed-in people. A flood of requests without a session (hammering the sign-in route, say) isn't stopped here and relies on whatever protection sits in front of the host.
 - There is no database migration tool. On start-up the service only creates tables that don't exist yet; changing an existing table means writing and running SQL by hand.
 - The document list is fetched from Google Drive every time, with no cache.
 - There are no notifications (no email when a registration is approved), no search, and no audit log. Announcements can't carry pictures.

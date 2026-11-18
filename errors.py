@@ -8,11 +8,12 @@ from werkzeug.exceptions import HTTPException
 class ApiError(Exception):
     """路由主動回報的錯誤，例如找不到資料、輸入不合規定。"""
 
-    def __init__(self, status: int, code: str, message: str):
+    def __init__(self, status: int, code: str, message: str, headers: dict[str, str] | None = None):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.headers = headers or {}  # 要一起回給瀏覽器的標頭，例如 Retry-After
 
 
 _HTTP_ERRORS = {
@@ -26,7 +27,7 @@ _HTTP_ERRORS = {
 def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(ApiError)
     def handle_api_error(error: ApiError):
-        return jsonify(error=error.message, code=error.code), error.status
+        return jsonify(error=error.message, code=error.code), error.status, error.headers
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException):

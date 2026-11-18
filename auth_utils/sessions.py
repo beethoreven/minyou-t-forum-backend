@@ -59,6 +59,27 @@ def delete(conn, token: str) -> None:
     conn.execute("DELETE FROM sessions WHERE token_hash = %s", (_hash(token),))
 
 
+def trim(conn, email: str, keep: int) -> None:
+    """一個帳號只留最近用過的 keep 張憑證，其餘的作廢。登入時呼叫。
+
+    一個人通常只有手機、電腦幾台裝置。不設上限的話，同一個帳號一直重複登入，
+    可以把 sessions 表塞滿。
+    """
+    conn.execute(
+        """
+        DELETE FROM sessions
+        WHERE email = %s
+          AND token_hash NOT IN (
+              SELECT token_hash FROM sessions
+              WHERE email = %s
+              ORDER BY last_seen_at DESC, created_at DESC
+              LIMIT %s
+          )
+        """,
+        (email, email, keep),
+    )
+
+
 def delete_idle(conn, idle_days: int) -> None:
     """清掉太久沒用的憑證。有人登入時順手做，不另外開排程。"""
     conn.execute(
