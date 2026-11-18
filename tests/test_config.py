@@ -73,6 +73,30 @@ def test_rejects_a_broken_documents_source(changes, mentions):
     assert "secret-key" not in str(error.value)
 
 
+def test_apps_script_is_optional_and_its_settings_come_as_a_pair():
+    assert load_config(DRIVE_ENV).apps_script_url is None  # 沒設定就是不開放附圖，服務照樣起得來
+
+    script = {"APPS_SCRIPT_URL": "https://script.google.com/macros/s/abc/exec", "APPS_SCRIPT_SECRET": "long-secret"}
+    config = load_config(DRIVE_ENV | script)
+    assert config.apps_script_url == script["APPS_SCRIPT_URL"]
+    assert config.apps_script_secret == "long-secret"
+    assert "long-secret" not in repr(config)
+
+
+@pytest.mark.parametrize(
+    "changes, mentions",
+    [
+        ({"APPS_SCRIPT_URL": "https://script.google.com/macros/s/abc/exec"}, "APPS_SCRIPT_SECRET"),
+        ({"APPS_SCRIPT_SECRET": "long-secret"}, "APPS_SCRIPT_URL"),
+        ({"APPS_SCRIPT_URL": "https://example.com/exec", "APPS_SCRIPT_SECRET": "long-secret"}, "APPS_SCRIPT_URL"),
+    ],
+)
+def test_rejects_half_configured_apps_script(changes, mentions):
+    with pytest.raises(ConfigError, match=mentions) as error:
+        load_config(DRIVE_ENV | changes)
+    assert "long-secret" not in str(error.value)
+
+
 @pytest.mark.parametrize("key", ["DATABASE_URL", "ALLOWED_ORIGINS", "GOOGLE_CLIENT_ID", "FIRST_ADMIN_EMAIL"])
 @pytest.mark.parametrize("blank", [None, "", "   "])
 def test_missing_required_setting_names_the_key(key, blank):

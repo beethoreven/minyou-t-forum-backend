@@ -50,6 +50,12 @@ class FakeSession:
         return response
 
 
+def test_manage_info_points_at_the_folder_in_google_drive():
+    info = GoogleDriveFolder(FOLDER, FakeSession()).manage_info()
+    assert info["source"] == "google_drive"
+    assert info["manage_url"] == f"https://drive.google.com/drive/folders/{FOLDER}"
+
+
 def test_list_follows_every_page_and_skips_google_native_items():
     session = FakeSession(
         FakeResponse(payload={"files": [PDF, GOOGLE_DOC], "nextPageToken": "page-2"}),

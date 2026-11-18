@@ -4,9 +4,18 @@
 （JavaScript 的 [...text].length），兩邊才不會一個說可以、一個說太長。
 """
 
+import base64
+import binascii
+
 from flask import Request
 
 from errors import ApiError
+
+# 一篇文章最多幾張附圖、一張最大多少。web 會先把圖片縮到 480P 再送，通常只有幾十 KB；
+# 這裡的上限是用來擋不照規矩來的請求。
+MAX_IMAGES = 5
+MAX_IMAGE_BYTES = 300 * 1024
+JPEG_SIGNATURE = b"\xff\xd8\xff"
 
 TITLE_MAX = 100
 BODY_MAX = 10_000
@@ -51,6 +60,38 @@ def choice_field(data: dict, key: str, label: str, choices: tuple[str, ...]) -> 
     if not isinstance(value, str) or value not in choices:
         raise ApiError(400, f"{key}_invalid", f"{label}不是可以選的值")
     return value
+
+
+def images_field(data: dict) -> list[bytes]:
+    """讀文章的附圖：[{"data": "<base64 編碼的 JPEG>"}, …]。沒有附圖回傳空的清單。"""
+    raw = data.get("images")
+    if raw is None:
+        return []
+    invalid = ApiError(400, "images_invalid", "附圖的格式不正確")
+    if not isinstance(raw, list):
+        raise invalid
+    if len(raw) > MAX_IMAGES:
+        raise ApiError(400, "too_many_images", f"一篇文章最多 {MAX_IMAGES} 張圖")
+
+    images = []
+    for item in raw:
+        encoded = item.get("data") if isinstance(item, dict) else None
+        if not isinstance(encoded, str):
+            raise invalid
+        # base64 編碼後大約是原本的 4/3。先用長度擋掉太大的，不用真的解開。
+        if len(encoded) > MAX_IMAGE_BYTES * 4 // 3 + 4:
+            raise ApiError(400, "image_too_large", "圖片太大")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise invalid from None
+        if len(content) > MAX_IMAGE_BYTES:
+            raise ApiError(400, "image_too_large", "圖片太大")
+        # 只收 JPEG。檔頭對不上的一律不收，免得有人把別種檔案當成圖片塞進來。
+        if not content.startswith(JPEG_SIGNATURE):
+            raise ApiError(400, "image_not_jpeg", "附圖必須是 JPEG 圖片")
+        images.append(content)
+    return images
 
 
 def before_param(args) -> int | None:

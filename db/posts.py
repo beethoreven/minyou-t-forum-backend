@@ -64,6 +64,32 @@ def delete(conn, post_id: int) -> bool:
     return cursor.rowcount == 1
 
 
+def add_images(conn, post_id: int, file_ids: list[str]) -> None:
+    """記下這篇文章的附圖。file_ids 是圖片存放處給的代號，照上傳的順序。"""
+    for file_id in file_ids:
+        conn.execute(
+            "INSERT INTO post_images (post_id, file_id) VALUES (%s, %s)",
+            (post_id, file_id),
+        )
+
+
+def list_images(conn, post_id: int) -> list[dict]:
+    """一篇文章的附圖，照上傳的順序。"""
+    return conn.execute(
+        "SELECT id, file_id FROM post_images WHERE post_id = %s ORDER BY id",
+        (post_id,),
+    ).fetchall()
+
+
+def get_image_file_id(conn, post_id: int, image_id: int) -> str | None:
+    """某一張附圖存放處的代號。這張圖不屬於這篇文章就回傳 None。"""
+    row = conn.execute(
+        "SELECT file_id FROM post_images WHERE id = %s AND post_id = %s",
+        (image_id, post_id),
+    ).fetchone()
+    return row["file_id"] if row else None
+
+
 def list_replies(conn, post_id: int) -> list[dict]:
     """一篇文章的全部回覆，舊的在前面。"""
     return conn.execute(

@@ -8,6 +8,11 @@ def test_empty_folder(client):
     assert client.get("/documents").get_json() == {"items": []}
 
 
+def test_admin_page_is_told_where_documents_live(client, documents_dir):
+    info = client.get("/admin/documents").get_json()
+    assert info == {"source": "local_folder", "manage_url": None, "location": str(documents_dir)}
+
+
 def test_lists_only_regular_files_sorted_by_name(client, documents_dir):
     (documents_dir / "b 管理辦法.pdf").write_bytes(b"12345")
     (documents_dir / "a 社區公約.pdf").write_bytes(b"123")

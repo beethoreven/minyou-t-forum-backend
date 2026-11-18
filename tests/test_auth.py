@@ -36,6 +36,7 @@ def member_update(role="member", status="approved", **extra) -> dict:
         ("get", "/documents/0123456789abcdef/download"),
         ("get", "/admin/users"),
         ("put", "/admin/users/1"),
+        ("get", "/admin/documents"),
     ],
 )
 def test_every_protected_route_needs_a_session(anonymous, method, path):
@@ -187,6 +188,7 @@ def test_member_can_read_and_post_but_not_announce(add_member, client):
         resident.put(f"/announcements/{announcement['id']}", json=ENTRY),
         resident.delete(f"/announcements/{announcement['id']}"),
         resident.get("/admin/users"),
+        resident.get("/admin/documents"),
         resident.put(f"/admin/users/{resident.user_id}", json=member_update(role="admin")),
     ):
         assert response.status_code == 403

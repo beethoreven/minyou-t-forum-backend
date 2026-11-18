@@ -35,6 +35,9 @@ class Config:
     documents_dir: Path | None = None
     service_account_info: dict | None = field(default=None, repr=False)
     drive_folder_id: str | None = None
+    # 文件放 Google Drive 時，文章的附圖要靠一支 Apps Script 代為存檔。沒設定就不能附圖。
+    apps_script_url: str | None = None
+    apps_script_secret: str | None = field(default=None, repr=False)
     session_idle_days: int = DEFAULT_SESSION_IDLE_DAYS
     port: int = DEFAULT_PORT
 
@@ -139,4 +142,19 @@ def _documents_source(env: Mapping[str, str]) -> dict:
         raise ConfigError("SERVICE_ACCOUNT_JSON 要是服務帳號金鑰檔的完整內容（一段 JSON）。")
     if not DRIVE_ID_PATTERN.fullmatch(folder_id):
         raise ConfigError("DRIVE_FOLDER_ID 要是資料夾網址最後那一段代號，不是整個網址。")
-    return {"service_account_info": info, "drive_folder_id": folder_id}
+    return {"service_account_info": info, "drive_folder_id": folder_id} | _apps_script(env)
+
+
+def _apps_script(env: Mapping[str, str]) -> dict:
+    """代為存圖的 Apps Script。兩個設定要嘛都填，要嘛都不填（不填就是不開放附圖）。"""
+    url = _value(env, "APPS_SCRIPT_URL")
+    secret = _value(env, "APPS_SCRIPT_SECRET")
+    if not url and not secret:
+        return {}
+    if not url:
+        raise ConfigError("填了 APPS_SCRIPT_SECRET，就也要填 APPS_SCRIPT_URL。")
+    if not secret:
+        raise ConfigError("填了 APPS_SCRIPT_URL，就也要填 APPS_SCRIPT_SECRET。")
+    if not url.startswith("https://script.google.com/"):
+        raise ConfigError("APPS_SCRIPT_URL 要是 Apps Script 部署後的網址（https://script.google.com/ 開頭）。")
+    return {"apps_script_url": url, "apps_script_secret": secret}

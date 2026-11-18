@@ -69,6 +69,17 @@ STATEMENTS = (
     """,
     # 「某一篇文章的所有回覆」是最常用的查詢，幫它建索引。
     "CREATE INDEX IF NOT EXISTS replies_post_id_idx ON replies (post_id)",
+    # 文章的附圖。圖片本身不在資料庫裡，這裡只記它存放處的代號（file_id）。
+    # 文章被刪除時，這裡的紀錄一起刪除。
+    """
+    CREATE TABLE IF NOT EXISTS post_images (
+        id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        post_id    bigint NOT NULL REFERENCES posts (id) ON DELETE CASCADE,
+        file_id    text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS post_images_post_id_idx ON post_images (post_id)",
 )
 
 

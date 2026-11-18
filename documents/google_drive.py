@@ -90,6 +90,18 @@ class GoogleDriveFolder:
             return None
         return _to_file(item), _read_chunks(download)
 
+    def manage_info(self) -> dict:
+        """後台的「新增文檔」會開這個網址：Google Drive 上的那個資料夾。
+
+        不經過論壇上傳，是因為服務帳號在 Google Drive 沒有自己的儲存空間，沒辦法把檔案
+        放進別人的資料夾。由資料夾的主人（或他給了編輯權限的人）直接放進去，檔案算他的。
+        """
+        return {
+            "source": "google_drive",
+            "manage_url": f"https://drive.google.com/drive/folders/{self.folder_id}",
+            "location": None,
+        }
+
     def _get(self, url: str, params: dict, *, missing_ok: bool = False, stream: bool = False):
         """呼叫 Google Drive。404 而且 missing_ok 時回傳 None，其他失敗都算暫時讀不到。"""
         try:

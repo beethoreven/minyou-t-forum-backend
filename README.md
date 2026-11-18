@@ -116,6 +116,18 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 
 文件的來源有兩種，介面相同（`documents/`）：正式環境讀 Google Drive，本機開發與測試讀一個本機資料夾。本機資料夾的版本不接受瀏覽器傳來的檔名或路徑，只接受清單裡出現過的代號，所以不管對方傳什麼，都拿不到資料夾以外的檔案。
 
+### 文章的附圖為什麼要靠一支 Apps Script
+
+發文章可以附圖，最多五張。圖片在瀏覽器裡先縮小成 480P 的 JPEG 才上傳，後端只檢查張數、大小與檔頭，不做影像處理。
+
+圖片放在文件資料夾底下的 `Pic` 資料夾。讀圖跟讀文件一樣用服務帳號；存圖卻不行：服務帳號在 Google Drive 沒有自己的儲存空間，在別人的資料夾裡建立檔案會被 Google 拒絕。所以存圖是請一支 Apps Script 代勞（`tools/apps_script/pictures.gs`）。它由資料夾的主人部署、用主人的身分執行，檔案算主人的。後端跟它之間用一個只有兩邊知道的密語確認身分，而且它只會動 `Pic` 資料夾。
+
+沒有設定這支指令碼時，論壇照常運作，只是不能附圖。
+
+資料庫只記每張圖存放處的代號（`post_images` 表）。瀏覽器看圖時給的是資料庫那一筆的編號，不是存放處的代號，所以沒辦法用猜的拿到別的檔案。存圖要連到外面的服務，可能要好幾秒，所以是在兩次資料庫連線之間做的，不會佔著連線等。
+
+同樣的限制也是後台的「新增文檔」不經過論壇上傳的原因：它只是把 Google Drive 的那個資料夾打開，由有編輯權限的人直接把檔案放進去。
+
 ### 列表為什麼用 before，不用頁碼
 
 列表一次回 20 筆，要下一批時帶上一批最後一筆的 id（`?before=<id>`），只拿 id 比它小的。
@@ -151,7 +163,8 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | `auth_utils/sessions.py` | 論壇自己的登入憑證 |
 | `auth_utils/access.py` | 權限規則 |
 | `db/` | 連線、建表（`schema.py`）、各資料表的讀寫 |
-| `documents/` | 文件清單與下載：`google_drive.py`、`local_folder.py` |
+| `documents/` | 文件清單與下載：`google_drive.py`、`local_folder.py`；文章附圖的存放：`pictures.py` |
+| `tools/apps_script/pictures.gs` | 代替後端把附圖存進 Google Drive 的 Apps Script |
 | `tools/local_db.sh` | 本機開發用的 PostgreSQL |
 | `tools/dev_session.py` | 本機開發時不經過 Google，直接發登入憑證 |
 | `tests/` | pytest 測試 |
@@ -161,8 +174,9 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 - 任何 Google 帳號都能登入並送出註冊。有人亂送時，版主或管理員把他停用即可，沒有另外做防濫用，也沒有頻率限制。
 - 沒有資料庫遷移工具。服務啟動時只會建立還不存在的表；要改既有的表，要另外寫 SQL 手動執行。
 - 文件清單每次都向 Google Drive 查，沒有快取。
-- 沒有通知（審核通過不會寄信）、沒有搜尋、沒有圖片與附件、沒有操作紀錄。
-- 讀 Google Drive 的部分，自動測試用的是假的回應，不會真的連到 Google。
+- 沒有通知（審核通過不會寄信）、沒有搜尋、沒有操作紀錄。公告不能附圖。
+- 文章的附圖只能在發文時選，之後不能更換；要換圖只能刪掉文章重新發。
+- 讀寫 Google Drive 的部分，自動測試用的是假的回應，不會真的連到 Google。
 
 ---
 
@@ -254,6 +268,11 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 3. **環境變數**：照 Part C 的表填。值的前後不要加引號。
 4. **Google Drive**：在 Google Cloud Console 啟用 Google Drive API、建立服務帳號並下載 JSON 金鑰；把放文件的資料夾分享給服務帳號的 email（結尾是 `.iam.gserviceaccount.com`），權限選「檢視者」。
 5. 部署完成後打開 `https://<你的服務>.onrender.com/health`，看到 `{"status":"ok"}` 就是起來了。設定有錯的話服務起不來，Logs 裡會寫是哪一個設定。
+6. **開放附圖（可以之後再做）**：
+   1. 用文件資料夾主人的 Google 帳號打開 `https://script.google.com/home`，建立新專案，把 `tools/apps_script/pictures.gs` 的內容整個貼進去。
+   2. 專案設定 → 指令碼屬性，加兩個：`SECRET`（自己取一串夠長的亂碼）、`FOLDER_ID`（跟 `DRIVE_FOLDER_ID` 一樣）。
+   3. 部署 → 新增部署作業 → 類型選「網頁應用程式」，執行身分選「我」，誰可以存取選「所有人」。第一次會要求授權存取 Google Drive。
+   4. 把部署後的網址填進 Render 的 `APPS_SCRIPT_URL`，剛剛那串亂碼填進 `APPS_SCRIPT_SECRET`。
 
 免費方案的服務閒置一陣子就會休息，下一個請求要等它醒來。想讓它保持醒著，可以用外部的排程服務每 10 分鐘打一次 `/health`；這支不碰資料庫。
 
@@ -267,7 +286,8 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `FIRST_ADMIN_EMAIL` | 必填 | 第一位管理員的 Google 帳號 |
 | `SERVICE_ACCOUNT_JSON` | 正式環境必填 | 服務帳號金鑰檔的完整內容 |
 | `DRIVE_FOLDER_ID` | 正式環境必填 | 文件資料夾的代號，就是資料夾網址最後那一段 |
-| `DOCUMENTS_DIR` | 本機必填 | 本機的文件資料夾。跟上面兩個只能擇一 |
+| `APPS_SCRIPT_URL`、`APPS_SCRIPT_SECRET` | 選填，兩個要一起填 | 代為存圖的 Apps Script 的網址與密語。沒填就不能附圖 |
+| `DOCUMENTS_DIR` | 本機必填 | 本機的文件資料夾，附圖放在它底下的 `Pic`。跟上面四個只能擇一 |
 | `SESSION_IDLE_DAYS` | 選填，預設 90 | 登入憑證連續幾天沒用就失效 |
 | `PORT` | 選填，預設 5180 | 本機啟動用的 port |
 
@@ -285,13 +305,15 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `GET /announcements`、`GET /announcements/<id>` | 已審核 | 公告列表、公告內容 |
 | `POST /announcements`、`PUT`、`DELETE /announcements/<id>` | 版主、管理員 | 新增、編輯、刪除公告 |
 | `GET /posts`、`GET /posts/<id>` | 已審核 | 文章列表、文章內容與回覆 |
-| `POST /posts` | 已審核 | 新增文章 |
+| `POST /posts` | 已審核 | 新增文章，可以附最多五張圖 |
+| `GET /posts/<id>/images/<圖片編號>` | 已審核 | 文章的一張附圖 |
 | `PUT /posts/<id>`、`DELETE /posts/<id>` | 作者本人、版主、管理員 | 編輯、刪除文章 |
 | `POST /posts/<id>/replies` | 已審核 | 回覆 |
 | `DELETE /replies/<id>` | 作者本人、版主、管理員 | 刪除回覆 |
 | `GET /documents`、`GET /documents/<file_id>/download` | 已審核 | 文件清單、下載 |
 | `GET /admin/users` | 版主、管理員 | 成員列表 |
 | `PUT /admin/users/<id>` | 版主、管理員 | 改顯示名稱、戶號、角色、狀態 |
+| `GET /admin/documents` | 版主、管理員 | 文件放在哪裡、要去哪裡新增 |
 
 ---
 
@@ -413,6 +435,18 @@ Only ordinary files (PDF, Word, images and so on) are listed. Online formats suc
 
 There are two document sources with the same interface (`documents/`): production reads Google Drive, local development and tests read a local folder. The local-folder version accepts no file name or path from the browser, only an id that appeared in the listing, so whatever is sent, nothing outside the folder can be reached.
 
+### Why Post Pictures Rely on an Apps Script
+
+A post can carry up to five pictures. Each is shrunk to a 480p JPEG in the browser before upload; the backend only checks the count, the size and the file signature, and does no image processing.
+
+Pictures live in a `Pic` folder under the documents folder. Reading them uses the service account, just like documents; saving them cannot: a service account has no storage of its own in Google Drive, and Google refuses to let it create files in someone else's folder. So saving is delegated to an Apps Script (`tools/apps_script/pictures.gs`). The folder's owner deploys it and it runs as the owner, so the files belong to the owner. The backend and the script recognise each other by a secret only the two of them know, and the script touches nothing but the `Pic` folder.
+
+Without the script configured the forum works as usual; pictures simply can't be attached.
+
+The database records only where each picture is stored (the `post_images` table). A browser asks for a picture by that row's number, not by the storage id, so other files can't be reached by guessing. Saving has to call an outside service and may take several seconds, so it happens between two database connections rather than while holding one.
+
+The same limitation is why "add document" on the admin page doesn't upload through the forum: it just opens that Google Drive folder, and someone with edit access puts the file in directly.
+
 ### Why Lists Use `before` Instead of Page Numbers
 
 A list returns 20 items at a time. To get the next batch, send the id of the last item of the previous one (`?before=<id>`), and only items with a smaller id are returned.
@@ -448,7 +482,8 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 | `auth_utils/sessions.py` | The forum's own session tokens |
 | `auth_utils/access.py` | Permission rules |
 | `db/` | Connection, table creation (`schema.py`), and reads and writes per table |
-| `documents/` | Document listing and download: `google_drive.py`, `local_folder.py` |
+| `documents/` | Document listing and download: `google_drive.py`, `local_folder.py`; post picture storage: `pictures.py` |
+| `tools/apps_script/pictures.gs` | The Apps Script that saves pictures into Google Drive on the backend's behalf |
 | `tools/local_db.sh` | PostgreSQL for local development |
 | `tools/dev_session.py` | Issues a session token directly during local development, bypassing Google |
 | `tests/` | pytest tests |
@@ -458,8 +493,9 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 - Any Google account can sign in and submit a registration. If someone abuses it, a moderator or administrator disables them; there is no further abuse protection and no rate limiting.
 - There is no database migration tool. On start-up the service only creates tables that don't exist yet; changing an existing table means writing and running SQL by hand.
 - The document list is fetched from Google Drive every time, with no cache.
-- There are no notifications (no email when a registration is approved), no search, no images or attachments, and no audit log.
-- The Google Drive code is tested with fake responses; the automated tests never contact Google.
+- There are no notifications (no email when a registration is approved), no search, and no audit log. Announcements can't carry pictures.
+- A post's pictures can only be chosen when the post is created and can't be replaced afterwards; to change them, delete the post and write it again.
+- The code that reads and writes Google Drive is tested with fake responses; the automated tests never contact Google.
 
 ---
 
@@ -551,6 +587,11 @@ The database runs on Neon and the backend on Render. **Pick the same region for 
 3. **Environment variables**: fill them in from the table in Part C. Don't wrap values in quotes.
 4. **Google Drive**: in Google Cloud Console, enable the Google Drive API, create a service account and download its JSON key; share the documents folder with the service account's email (it ends in `.iam.gserviceaccount.com`) as a viewer.
 5. Once deployed, open `https://<your-service>.onrender.com/health`; `{"status":"ok"}` means it is up. If a setting is wrong the service won't start, and the Logs say which setting.
+6. **Enable pictures (can be done later)**:
+   1. Signed in as the owner of the documents folder, open `https://script.google.com/home`, create a new project, and paste in the whole of `tools/apps_script/pictures.gs`.
+   2. In Project Settings → Script Properties, add two: `SECRET` (a long random string of your own) and `FOLDER_ID` (the same as `DRIVE_FOLDER_ID`).
+   3. Deploy → New deployment → type "Web app", execute as "Me", who has access "Anyone". The first time, it asks you to authorize access to Google Drive.
+   4. Put the deployment's URL into Render's `APPS_SCRIPT_URL` and the random string into `APPS_SCRIPT_SECRET`.
 
 A free-tier service goes to sleep after being idle for a while, and the next request waits for it to wake. To keep it awake, have an external scheduler request `/health` every 10 minutes; that route doesn't touch the database.
 
@@ -564,7 +605,8 @@ A free-tier service goes to sleep after being idle for a while, and the next req
 | `FIRST_ADMIN_EMAIL` | Required | The first administrator's Google account |
 | `SERVICE_ACCOUNT_JSON` | Required in production | The full contents of the service account key file |
 | `DRIVE_FOLDER_ID` | Required in production | The documents folder's id, the last segment of the folder's URL |
-| `DOCUMENTS_DIR` | Required locally | A local documents folder. Mutually exclusive with the two above |
+| `APPS_SCRIPT_URL`, `APPS_SCRIPT_SECRET` | Optional, set both together | The URL and secret of the Apps Script that saves pictures. Without them pictures can't be attached |
+| `DOCUMENTS_DIR` | Required locally | A local documents folder; pictures go in `Pic` beneath it. Mutually exclusive with the four above |
 | `SESSION_IDLE_DAYS` | Optional, default 90 | Days of no use after which a session token expires |
 | `PORT` | Optional, default 5180 | The port used when running locally |
 
@@ -582,10 +624,12 @@ Errors are always `{"error": "message for people", "code": "code"}`.
 | `GET /announcements`, `GET /announcements/<id>` | Approved | The announcement list; one announcement |
 | `POST /announcements`, `PUT`, `DELETE /announcements/<id>` | Moderator, administrator | Create, edit and delete announcements |
 | `GET /posts`, `GET /posts/<id>` | Approved | The post list; one post with its replies |
-| `POST /posts` | Approved | Create a post |
+| `POST /posts` | Approved | Create a post, with up to five pictures |
+| `GET /posts/<id>/images/<picture number>` | Approved | One picture of a post |
 | `PUT /posts/<id>`, `DELETE /posts/<id>` | The author, moderator, administrator | Edit and delete a post |
 | `POST /posts/<id>/replies` | Approved | Reply |
 | `DELETE /replies/<id>` | The author, moderator, administrator | Delete a reply |
 | `GET /documents`, `GET /documents/<file_id>/download` | Approved | The document list; download |
 | `GET /admin/users` | Moderator, administrator | The member list |
 | `PUT /admin/users/<id>` | Moderator, administrator | Change display name, unit number, role and status |
+| `GET /admin/documents` | Moderator, administrator | Where documents are kept and where to add one |

@@ -36,6 +36,10 @@ class LocalFolder:
             return file, _read_chunks(handle)
         return None
 
+    def manage_info(self) -> dict:
+        """本機資料夾沒有網址可以開，只告訴後台資料夾在哪裡。"""
+        return {"source": "local_folder", "manage_url": None, "location": str(self.folder)}
+
     def _scan(self) -> list[tuple[DocumentFile, Path]]:
         found = []
         try:
