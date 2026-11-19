@@ -22,7 +22,7 @@ from db import users  # noqa: E402
 from db.connection import connect  # noqa: E402
 
 # 要跟 web 的 js/auth.js 存登入狀態用的名稱一樣。
-STORAGE_KEY = "minyou_t_forum.session"
+STORAGE_KEY = "minyou-t-forum.session"
 
 
 def main() -> None:

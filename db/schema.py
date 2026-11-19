@@ -5,7 +5,7 @@
 """
 
 # 兩個行程同時啟動、一起建表時會互相撞到而失敗。建表前先拿這把鎖，一次只讓一個行程做。
-SCHEMA_LOCK = "minyou_t_forum:schema"
+SCHEMA_LOCK = "minyou-t-forum:schema"
 
 STATEMENTS = (
     # 成員。

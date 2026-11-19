@@ -23,6 +23,7 @@ case "${1:-start}" in
     if ! "$PGBIN/pg_ctl" -D "$DATA" status >/dev/null 2>&1; then
       "$PGBIN/pg_ctl" -D "$DATA" -o "-p $PORT -k /tmp" -l "$DATA/server.log" -w start
     fi
+    # 資料庫的名稱用底線：PostgreSQL 不加引號的名稱不能有連字號。
     for db in minyou_t_forum_dev minyou_t_forum_test; do
       "$PGBIN/psql" -h localhost -p "$PORT" -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
         || "$PGBIN/createdb" -h localhost -p "$PORT" -U postgres "$db"
