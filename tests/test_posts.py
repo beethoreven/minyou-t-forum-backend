@@ -21,6 +21,8 @@ def test_create_then_read(client):
     assert created["title"] == "頂樓可以曬棉被嗎"
     assert created["body"] == "想請問大家的看法。"
     assert created["author_name"] == "測試使用者"
+    assert created["author_role"] == "admin"
+    assert created["version"] == 1
     assert created["replies"] == []
 
     fetched = client.get(f"/posts/{created['id']}")
@@ -41,6 +43,7 @@ def test_list_shows_author_and_reply_count(client):
             "id": second["id"],
             "title": "第二篇",
             "author_name": "測試使用者",
+            "author_role": "admin",
             "created_at": second["created_at"],
             "reply_count": 0,
         },
@@ -48,6 +51,7 @@ def test_list_shows_author_and_reply_count(client):
             "id": first["id"],
             "title": "第一篇",
             "author_name": "測試使用者",
+            "author_role": "admin",
             "created_at": first["created_at"],
             "reply_count": 2,
         },
@@ -86,13 +90,48 @@ def test_update_keeps_the_replies(client):
     created = create_post(client).get_json()
     reply = create_reply(client, created["id"]).get_json()
 
-    response = client.put(f"/posts/{created['id']}", json={"title": "新標題", "body": "新內文"})
+    response = client.put(f"/posts/{created['id']}", json={"title": "新標題", "body": "新內文", "version": 1})
     assert response.status_code == 200
     updated = response.get_json()
     assert updated["title"] == "新標題"
     assert updated["body"] == "新內文"
+    assert updated["version"] == 2
     assert updated["replies"] == [reply]
     assert client.get(f"/posts/{created['id']}").get_json() == updated
+
+
+def test_an_edit_based_on_an_old_version_is_refused(add_member, client):
+    """作者與版主同時打開編輯頁：後送出的那一個不能蓋掉先送出的。"""
+    author = add_member("author@example.com", name="作者")
+    post = create_post(author).get_json()
+
+    assert author.put(f"/posts/{post['id']}", json={"title": "作者改的", "body": "內文", "version": 1}).status_code == 200
+    late = client.put(f"/posts/{post['id']}", json={"title": "版主改的", "body": "內文", "version": 1})
+    assert late.status_code == 409
+    assert late.get_json()["code"] == "edit_conflict"
+    assert client.get(f"/posts/{post['id']}").get_json()["title"] == "作者改的"
+
+    # 沒帶版本號的是改版之前的舊畫面，也請他重新整理
+    old_page = author.put(f"/posts/{post['id']}", json={"title": "標題", "body": "內文"})
+    assert old_page.status_code == 409
+    assert old_page.get_json()["code"] == "edit_conflict"
+
+    for bad in ("1", 0, -1, True, 1.5):
+        response = author.put(f"/posts/{post['id']}", json={"title": "標題", "body": "內文", "version": bad})
+        assert response.status_code == 400, bad
+        assert response.get_json()["code"] == "version_invalid"
+
+
+def test_staff_names_carry_their_role(add_member, client):
+    resident = add_member("resident@example.com", name="管理員")  # 一般住戶取了「管理員」這個名字
+    moderator = add_member("moderator@example.com", role="moderator", name="版主")
+    post = create_post(resident).get_json()
+    reply = moderator.post(f"/posts/{post['id']}/replies", json={"body": "收到"}).get_json()
+
+    assert post["author_role"] == "member"
+    assert reply["author_role"] == "moderator"
+    listed = client.get("/posts").get_json()["items"][0]
+    assert (listed["author_name"], listed["author_role"]) == ("管理員", "member")
 
 
 def test_delete_post_also_deletes_its_replies(client):
@@ -111,7 +150,7 @@ def test_delete_post_also_deletes_its_replies(client):
 @pytest.mark.parametrize("method", ["get", "put", "delete"])
 @pytest.mark.parametrize("missing_id", ["12345", BEYOND_BIGINT])
 def test_missing_post_is_404(client, method, missing_id):
-    payload = {"json": {"title": "標題", "body": "內文"}} if method == "put" else {}
+    payload = {"json": {"title": "標題", "body": "內文", "version": 1}} if method == "put" else {}
     response = getattr(client, method)(f"/posts/{missing_id}", **payload)
     assert response.status_code == 404
     assert response.get_json()["code"] == "post_not_found"

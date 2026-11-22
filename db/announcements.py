@@ -28,8 +28,8 @@ def list_page(conn, before: int | None) -> tuple[list[dict], bool]:
 def get(conn, announcement_id: int) -> dict | None:
     return conn.execute(
         """
-        SELECT a.id, a.title, a.body, a.created_at, a.updated_at,
-               a.author_id, u.display_name AS author_name
+        SELECT a.id, a.title, a.body, a.created_at, a.updated_at, a.version,
+               a.author_id, u.display_name AS author_name, u.role AS author_role
         FROM announcements a JOIN users u ON u.id = a.author_id
         WHERE a.id = %s
         """,
@@ -45,13 +45,30 @@ def create(conn, title: str, body: str, author_id: int) -> int:
     return row["id"]
 
 
-def update(conn, announcement_id: int, title: str, body: str) -> bool:
-    """回傳有沒有改到（False 代表沒有這則公告）。"""
+def update(conn, announcement_id: int, title: str, body: str, version: int) -> bool:
+    """改公告。version 是編輯的人打開時看到的版本號；這段期間被別人改過（版本號對不上）、
+    或公告已經不在了，都不會改到，回傳 False。"""
     cursor = conn.execute(
-        "UPDATE announcements SET title = %s, body = %s, updated_at = now() WHERE id = %s",
-        (title, body, announcement_id),
+        """
+        UPDATE announcements
+        SET title = %s, body = %s, updated_at = now(), version = version + 1
+        WHERE id = %s AND version = %s
+        """,
+        (title, body, announcement_id, version),
     )
     return cursor.rowcount == 1
+
+
+def count_since(conn, author_id: int, seconds: int) -> int:
+    """這個人在最近這段時間內發了幾則公告。限制發公告的數量用。"""
+    row = conn.execute(
+        """
+        SELECT count(*) AS total FROM announcements
+        WHERE author_id = %s AND created_at > now() - make_interval(secs => %s)
+        """,
+        (author_id, seconds),
+    ).fetchone()
+    return row["total"]
 
 
 def delete(conn, announcement_id: int) -> bool:

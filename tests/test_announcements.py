@@ -2,6 +2,9 @@
 
 import pytest
 
+from auth_utils import guard
+from auth_utils.guard import WriteLimit
+
 # 19 位數，但比 PostgreSQL bigint 的上限還大。
 BEYOND_BIGINT = "9999999999999999999"
 
@@ -110,7 +113,7 @@ def test_update(client):
     created = create(client).get_json()
     response = client.put(
         f"/announcements/{created['id']}",
-        json={"title": "停水通知（改期）", "body": "改到週六。"},
+        json={"title": "停水通知（改期）", "body": "改到週六。", "version": created["version"]},
     )
     assert response.status_code == 200
     updated = response.get_json()
@@ -118,7 +121,41 @@ def test_update(client):
     assert updated["body"] == "改到週六。"
     assert updated["created_at"] == created["created_at"]
     assert updated["updated_at"] >= created["created_at"]
+    assert updated["version"] == created["version"] + 1
     assert client.get(f"/announcements/{created['id']}").get_json() == updated
+
+
+def test_an_edit_based_on_an_old_version_is_refused(add_member, client):
+    moderator = add_member("moderator@example.com", role="moderator")
+    created = create(client).get_json()
+
+    assert moderator.put(f"/announcements/{created['id']}", json={"title": "版主改的", "body": "內文", "version": 1}).status_code == 200
+    late = client.put(f"/announcements/{created['id']}", json={"title": "管理員改的", "body": "內文", "version": 1})
+    assert late.status_code == 409
+    assert late.get_json()["code"] == "edit_conflict"
+    assert client.get(f"/announcements/{created['id']}").get_json()["title"] == "版主改的"
+
+    old_page = client.put(f"/announcements/{created['id']}", json={"title": "標題", "body": "內文"})
+    assert old_page.status_code == 409
+
+
+def test_moderators_have_an_announcement_limit_but_the_admin_does_not(add_member, client, monkeypatch):
+    monkeypatch.setattr(guard, "ANNOUNCEMENT_LIMITS", (WriteLimit(600, 2, "10 分鐘"),))
+    moderator = add_member("moderator@example.com", role="moderator")
+
+    assert [create(moderator).status_code for _ in range(2)] == [201, 201]
+    blocked = create(moderator)
+    assert blocked.status_code == 429
+    assert blocked.get_json()["code"] == "write_limited"
+    assert "10 分鐘" in blocked.get_json()["error"]
+    assert [create(client).status_code for _ in range(3)] == [201] * 3  # 管理員不限
+    assert len(client.get("/announcements").get_json()["items"]) == 5
+
+
+def test_announcements_show_the_author_role(add_member, client):
+    moderator = add_member("moderator@example.com", role="moderator", name="版主")
+    created = create(moderator).get_json()
+    assert (created["author_name"], created["author_role"]) == ("版主", "moderator")
 
 
 def test_update_validates_input_and_keeps_the_old_content(client):
@@ -140,7 +177,7 @@ def test_delete(client):
 @pytest.mark.parametrize("method", ["get", "put", "delete"])
 @pytest.mark.parametrize("missing_id", ["12345", BEYOND_BIGINT])
 def test_missing_announcement_is_404(client, method, missing_id):
-    payload = {"json": {"title": "標題", "body": "內文"}} if method == "put" else {}
+    payload = {"json": {"title": "標題", "body": "內文", "version": 1}} if method == "put" else {}
     response = getattr(client, method)(f"/announcements/{missing_id}", **payload)
     assert response.status_code == 404
     assert response.get_json()["code"] == "announcement_not_found"

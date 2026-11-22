@@ -4,8 +4,11 @@ import io
 import os
 from urllib.parse import quote
 
+import psycopg
 import pytest
 
+from auth_utils import guard
+from auth_utils.guard import WriteLimit
 from documents.base import DocumentsUnavailable
 from documents.local_folder import LocalFolder
 
@@ -271,3 +274,44 @@ def test_a_failed_upload_tells_staff_what_to_check(client, monkeypatch):
     response = upload(client, "社區公約.pdf")
     assert response.status_code == 503
     assert "只進 log 的細節" not in response.get_data(as_text=True)
+
+
+# ── 上傳的量 ─────────────────────────────────────────────
+
+
+def test_moderators_have_an_upload_limit_but_the_admin_does_not(add_member, client, monkeypatch):
+    monkeypatch.setattr(guard, "UPLOAD_LIMITS", (WriteLimit(600, 2, "10 分鐘"),))
+    moderator = add_member("moderator@example.com", role="moderator")
+
+    assert [upload(moderator, f"第{n}份.pdf").status_code for n in range(2)] == [201, 201]
+    blocked = upload(moderator, "第三份.pdf")
+    assert blocked.status_code == 429
+    assert blocked.get_json()["code"] == "write_limited"
+    assert "第三份.pdf" not in listed(client)  # 沒有存進去
+    assert [upload(client, f"管理員{n}.pdf").status_code for n in range(3)] == [201] * 3
+
+
+def test_moderators_have_a_daily_upload_total(add_member, monkeypatch):
+    monkeypatch.setattr(guard, "UPLOAD_BYTES_PER_DAY", 1024 * 1024)  # 一天 1 MB
+    moderator = add_member("moderator@example.com", role="moderator")
+
+    assert upload(moderator, "大的.pdf", b"x" * (700 * 1024)).status_code == 201
+    blocked = upload(moderator, "又一個.pdf", b"x" * (400 * 1024))
+    assert blocked.status_code == 429
+    assert "1 MB" in blocked.get_json()["error"]
+    assert upload(moderator, "小的.pdf", b"x" * (300 * 1024)).status_code == 201  # 還在總量內
+
+
+def test_a_failed_upload_does_not_use_up_the_limit(add_member, config, monkeypatch):
+    monkeypatch.setattr(guard, "UPLOAD_LIMITS", (WriteLimit(600, 1, "10 分鐘"),))
+    moderator = add_member("moderator@example.com", role="moderator")
+
+    def down(self, name, content):
+        raise DocumentsUnavailable("暫時連不上")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(LocalFolder, "save", down)
+        assert upload(moderator, "社區公約.pdf").status_code == 503
+    assert upload(moderator, "社區公約.pdf").status_code == 201  # 失敗的那一次不算數
+    with psycopg.connect(config.database_url) as conn:
+        assert conn.execute("SELECT count(*) FROM document_uploads").fetchone()[0] == 1

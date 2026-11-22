@@ -1,5 +1,7 @@
 """防濫用：請求頻率、發文數量、登入憑證數量。"""
 
+import threading
+
 import psycopg
 
 from auth_utils import guard
@@ -92,7 +94,29 @@ def test_only_recent_posts_count_toward_the_limit(add_member, config, monkeypatc
     assert resident.post("/posts", json=ENTRY).status_code == 201  # 那一篇已經超過 10 分鐘
 
 
-def test_an_account_keeps_only_its_newest_sessions(sign_in, config):
+def test_posting_at_the_same_moment_cannot_slip_past_the_limit(add_member, app, monkeypatch):
+    """同一個人同時送出好幾篇：大家不能都數到「還沒超過」就一起寫進去。"""
+    monkeypatch.setattr(guard, "POST_LIMITS", (WriteLimit(600, 2, "10 分鐘"),))
+    resident = add_member("resident@example.com")
+    start = threading.Barrier(8)
+    results = []
+
+    def send():
+        client = app.test_client()
+        client.session_token = resident.session_token
+        start.wait()
+        results.append(client.post("/posts", json=ENTRY).status_code)
+
+    threads = [threading.Thread(target=send) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(results) == [201, 201] + [429] * 6
+
+
+def test_an_account_keeps_only_its_newest_sessions(app, sign_in, config):
+    app.extensions["logins_per_account"].limit = 100  # 這裡要同一個帳號連續登入很多次
     clients = [sign_in(ADMIN_EMAIL) for _ in range(guard.MAX_SESSIONS_PER_ACCOUNT + 2)]
 
     with psycopg.connect(config.database_url) as conn:

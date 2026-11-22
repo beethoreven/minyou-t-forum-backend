@@ -51,6 +51,8 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 - 資料庫只存憑證的 SHA-256，不存原文。資料庫外洩時，別人拿不到能用的憑證。
 - 有效期是滑動的：有在用就一直有效，連續 90 天完全沒用才失效。
 - 最後使用時間超過 60 秒才更新一次，不會每個請求都寫資料庫。
+- 帳號被停用時，他所有的憑證一起作廢：之後就算恢復，停用前的舊憑證（包含遺失的手機上那一張）也不會跟著復活，要重新登入。被停用的人還開著網頁的話，下一個動作會先被請他重新登入，登入之後才看到「帳號無法使用」。
+- 後台可以讓一個人「登出他所有的裝置」（`DELETE /admin/users/<id>/sessions`），例如他的手機掉了。帳號不會被停用。
 
 連不上 Google 而無法驗證時回 503，不回 401：那不代表憑證是假的，不該讓前端把人登出。
 
@@ -98,7 +100,18 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 後台另外有兩條保護：
 
 - 誰都不能改自己的角色與狀態。唯一的管理員如果把自己降級或停用，就沒有人能改回來了。
-- 設定 `FIRST_ADMIN_EMAIL` 指定的帳號，每次登入都會被設回已審核的管理員。它不經過審核，也不會被別人鎖在外面。
+- 設定 `FIRST_ADMIN_EMAIL` 指定的帳號，只在論壇裡還沒有任何管理員時，登入就成為已審核的管理員。已經有管理員之後，它跟其他帳號一樣：別的管理員停用或降級它，它重新登入也不會自己恢復。這個帳號被盜時，才鎖得住它。代價是：還有其他管理員、但所有管理員都進不來的時候（例如另一位管理員把它降級後就不管了），論壇裡沒有辦法救回來，要直接在資料庫把角色改回去。
+- 版主與管理員一定是已審核的帳號。後端改帳號時會檢查，資料庫也有一條跨欄位的限制（`role = 'member' OR status = 'approved'`），直接改資料庫也做不出「被停用的版主」。這條限制是服務啟動時補上的：先只檢查之後寫入的資料，再另外檢查既有的資料；既有的資料不符合時只寫 log，不讓服務起不來。
+
+### 後台改帳號為什麼要帶「改之前的樣子」
+
+後台每一列都是載入那一刻的資料。兩個人同時開著後台時，舊的畫面按下儲存，會把別人剛改好的內容蓋回去，例如把剛被停用的人改回已審核。
+
+所以 `PUT /admin/users/<id>` 要帶 `expected`：畫面載入時看到的名稱、戶號、角色、狀態。後端先鎖住那一筆（`SELECT … FOR UPDATE`），跟現在的資料比對，對不上就回 409 `member_changed`，畫面會重新載入清單。鎖住再檢查，也讓「檢查能不能改」與「寫入」之間沒有空檔：版主儲存的同時，管理員剛好把同一個人升成管理員，版主也不能把他改回去。沒帶 `expected` 的是改版前的舊畫面，一樣回 409，請他重新整理。
+
+### 編輯公告與文章為什麼要帶版本號
+
+公告與文章各有一個版本號（`version`），每改一次加一。編輯時要帶著打開編輯頁時看到的版本號；這段期間被別人改過（例如作者與版主同時在改），版本號對不上，回 409 `edit_conflict`，不會直接蓋掉先存的那一份。畫面上打的字會留著，使用者可以先複製起來再重新整理。
 
 ### 怎麼擋住狂打 API、狂發文章
 
@@ -109,13 +122,17 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | 請求的頻率 | 每分鐘 120 個請求 | 記在記憶體，每個帶登入憑證的請求算一次 |
 | 發文章 | 10 分鐘 5 篇、一天 30 篇 | 數資料庫裡他最近發了幾篇 |
 | 回覆 | 10 分鐘 20 則、一天 200 則 | 同上 |
+| 發公告（版主） | 10 分鐘 5 則、一天 20 則 | 同上 |
+| 上傳文檔（版主） | 10 分鐘 10 個、一天 50 個，一天合計最多 200 MB | 數 `document_uploads` 表 |
 | 登入憑證 | 一個帳號最多留 10 張 | 登入時把最舊的作廢 |
+| 登入 | 同一個來源每分鐘 30 次；同一個 Google 帳號 10 分鐘 10 次 | 記在記憶體 |
 
 - 超過就回 429，並說明多久之後可以再試。被限制只是暫時不能操作，不會被停用；要停用一個帳號，由版主或管理員在後台做。
 - 請求的頻率記在記憶體，不進資料庫：每個請求都會經過這一關，為了省資源而每次寫一筆資料，反而花更多資源。服務重啟時計數歸零，那只是重新開始算一分鐘。代價是服務只能跑一個行程。
-- 發文的數量直接數資料庫，不另外記帳，所以服務重啟也不會被重設。
-- 管理員不受請求頻率與發文數量的限制：唯一的管理員如果被系統擋在外面，就沒有人能處理了。
-- 沒有登入的請求不在這裡算。它們碰不到任何資料，在第一關就被擋下（401）。
+- 發文的數量直接數資料庫，不另外記帳，所以服務重啟也不會被重設。數之前先拿這個人的鎖（PostgreSQL 的 advisory lock），同一個人同時送出好幾篇時一個一個來；不然大家都數到「還沒超過」，就會一起寫進去。鎖是在讀完請求內容之後才拿：讀請求要等瀏覽器傳完，手機網路可能要好幾秒，不能拿著鎖等。讀之前會先不拿鎖粗查一次，已經超過的人不用把內容傳完。實測：上限 2 篇、同時送 8 篇，沒有鎖的時候 8 篇全部寫進去，有鎖之後只進去 2 篇。
+- 公告與上傳文檔的上限是給版主的。沒有這兩道限制時，一位版主幾分鐘就能用公告的附圖塞滿 Neon 免費的 0.5 GB，或用上傳塞滿存放文檔那個帳號的雲端硬碟（空間跟他的信箱共用）。上傳是先在 `document_uploads` 記一筆、佔好名額，再去存檔；存檔失敗就把那一筆拿掉。
+- 管理員不受請求頻率與寫入數量的限制：唯一的管理員如果被系統擋在外面，就沒有人能處理了。
+- 沒有登入的請求只有 `/auth/login` 碰得到資料庫，所以它另外有次數限制。服務放在代理伺服器後面，「同一個來源」看的是代理接在 `X-Forwarded-For` 最後面的位址；前面的部分是請求自己帶的，可以亂填，所以不採用。
 
 ### 內文為什麼只存純文字
 
@@ -164,7 +181,11 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 
 ### 附圖存在哪裡
 
-公告與文章都可以附圖，最多五張。圖片在瀏覽器裡先縮小成 480P 的 JPEG 才上傳，後端只檢查張數、大小與檔頭，不做影像處理。
+公告與文章都可以附圖，最多五張。圖片在瀏覽器裡先縮小成 480P 的 JPEG 才上傳。
+
+後端不假設圖片已經處理過：任何人都可以不經過網頁，直接呼叫 API 上傳帶著拍攝位置的原始照片。所以每一張都在伺服器解開、照 EXIF 的方向標記轉正，再只用畫素重新存一次 JPEG（`imaging.py`，用 Pillow）。存進去的圖不帶 EXIF、註解或色彩描述檔。解開之前先看圖片宣稱的尺寸，超過 400 萬畫素或任一邊超過 8000 的直接拒絕：檔案很小、尺寸卻很大的圖，解開時會吃掉好幾 GB 的記憶體；服務只有 512 MB，同時又會有好幾個請求，上限不能抓太寬（480P 的全景照 480 × 8000 是 384 萬畫素，還在範圍內）。
+
+看圖的回應讓瀏覽器留一小時（`Cache-Control: private, max-age=3600`），並加上 `Vary: Authorization`：文章刪掉、帳號停用之後，留在瀏覽器裡的圖最多一小時就失效；同一台電腦換另一個帳號登入，也要重新向伺服器要，伺服器會重新檢查權限。
 
 圖片存在資料庫（`stored_pictures` 表），不放 Google Drive。附圖是每一位住戶發文時都會用到的功能：放資料庫的話，發文不用等外面的服務回應，也不會因為外面的服務出狀況而發不出去。縮小後的圖片一張只有幾十 KB，資料庫放得下。
 
@@ -203,11 +224,12 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | `config.py` | 設定的唯一讀取點 |
 | `errors.py` | 錯誤的統一格式：`{"error": 訊息, "code": 代碼}` |
 | `validation.py` | 輸入檢查 |
+| `imaging.py` | 附圖在伺服器重新存檔：轉正、去掉中繼資料、擋掉尺寸太大的圖 |
 | `auth_utils/google_auth.py` | 驗證 Google 的 ID Token |
 | `auth_utils/sessions.py` | 論壇自己的登入憑證 |
 | `auth_utils/access.py` | 權限規則 |
-| `auth_utils/guard.py` | 防濫用：請求頻率、發文數量、登入憑證數量的限制 |
-| `db/` | 連線、建表（`schema.py`）、各資料表的讀寫；附圖的內容在 `pictures.py` |
+| `auth_utils/guard.py` | 防濫用：請求頻率、寫入數量、登入次數、登入憑證數量的限制 |
+| `db/` | 連線、建表與補欄位（`schema.py`）、各資料表的讀寫；附圖的內容在 `pictures.py`，上傳紀錄在 `uploads.py` |
 | `documents/` | 文件的清單、下載、上傳、刪除：`google_drive.py`、`local_folder.py` |
 | `tools/apps_script/documents.gs` | 代替後端把文檔放進 Google Drive 的 Apps Script |
 | `tools/local_db.sh` | 本機開發用的 PostgreSQL |
@@ -217,8 +239,9 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 ### 已知限制
 
 - 任何 Google 帳號都能登入並送出註冊。有人亂送時，版主或管理員把他停用即可。
-- 頻率與數量的限制只算已經登入的人。沒登入的大量請求（例如對登入那一支狂打）沒有另外擋，要靠主機前面的防護。
-- 沒有資料庫遷移工具。服務啟動時只會建立還不存在的表；要改既有的表，要另外寫 SQL 手動執行。
+- 沒登入的大量請求只有 `/auth/login` 有次數限制，其他的要靠主機前面的防護。如果代理接在 `X-Forwarded-For` 最後面的其實是另一層代理的位址，很多人會被算成同一個來源；每分鐘 30 次是照這個情況抓得比較寬的。
+- 沒有資料庫遷移工具。服務啟動時會建立還不存在的表，並執行 `db/schema.py` 裡可以重複執行的 `MIGRATIONS`（補欄位、補限制）；改型別這類修改還是要另外寫 SQL 手動執行。
+- 請求頻率與登入次數記在記憶體，服務重啟或休眠之後歸零。
 - 文件清單每次都向 Google Drive 查，沒有快取。
 - 沒有通知（審核通過不會寄信）、沒有搜尋、沒有操作紀錄。
 - 公告與文章的附圖只能在新增時選，之後不能更換；要換圖只能刪掉重新發。
@@ -365,19 +388,20 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `POST /auth/logout` | 任何人 | 讓帶來的憑證失效 |
 | `GET /auth/status` | 已登入 | 目前的狀態與角色 |
 | `POST /auth/register` | 已登入、還沒有帳號 | 送出顯示名稱與戶號，建立審核中的帳號 |
-| `GET /announcements`、`GET /announcements/<id>` | 已審核 | 公告列表、公告內容 |
+| `GET /announcements`、`GET /announcements/<id>` | 已審核 | 公告列表、公告內容。內容帶 `author_role`（作者現在的角色）與 `version`（編輯時要帶回來的版本號） |
 | `GET /announcements/<id>/images/<圖片編號>` | 已審核 | 公告的一張附圖 |
 | `POST /announcements` | 版主、管理員 | 新增公告，可以附最多五張圖 |
-| `PUT /announcements/<id>`、`DELETE /announcements/<id>` | 版主、管理員 | 編輯、刪除公告 |
+| `PUT /announcements/<id>`、`DELETE /announcements/<id>` | 版主、管理員 | 編輯、刪除公告。編輯要帶 `version`，對不上回 409 `edit_conflict` |
 | `GET /posts`、`GET /posts/<id>` | 已審核 | 文章列表、文章內容與回覆 |
 | `POST /posts` | 已審核 | 新增文章，可以附最多五張圖 |
 | `GET /posts/<id>/images/<圖片編號>` | 已審核 | 文章的一張附圖 |
-| `PUT /posts/<id>`、`DELETE /posts/<id>` | 作者本人、版主、管理員 | 編輯、刪除文章 |
+| `PUT /posts/<id>`、`DELETE /posts/<id>` | 作者本人、版主、管理員 | 編輯、刪除文章。編輯要帶 `version`，對不上回 409 `edit_conflict` |
 | `POST /posts/<id>/replies` | 已審核 | 回覆 |
 | `DELETE /replies/<id>` | 作者本人、版主、管理員 | 刪除回覆 |
 | `GET /documents`、`GET /documents/<file_id>/download` | 已審核 | 文件清單、下載 |
 | `GET /admin/users` | 版主、管理員 | 成員列表 |
-| `PUT /admin/users/<id>` | 版主、管理員 | 改顯示名稱、戶號、角色、狀態 |
+| `PUT /admin/users/<id>` | 版主、管理員 | 改顯示名稱、戶號、角色、狀態。要帶 `expected`（畫面載入時的四個欄位），對不上回 409 `member_changed`。停用時會作廢他所有的登入憑證 |
+| `DELETE /admin/users/<id>/sessions` | 版主、管理員（版主不能對管理員用） | 讓這個人在所有裝置上登出，回應 `{"revoked": 作廢的張數}` |
 | `GET /admin/documents` | 版主、管理員 | 能不能從後台上傳文檔、一個檔案最大多少 |
 | `POST /admin/documents` | 版主、管理員 | 上傳一份文檔：`multipart/form-data`，欄位名稱 `file`，最多 10 MB。同名的檔案會被取代 |
 | `DELETE /admin/documents/<file_id>` | 版主、管理員 | 刪除一份文檔 |
@@ -437,6 +461,8 @@ So Google's token is used exactly once, in `POST /auth/login`. After it verifies
 - The database stores only the token's SHA-256, never the token itself. If the database leaks, nobody gets a usable token.
 - Expiry is sliding: the token stays valid as long as it is used, and expires only after 90 consecutive days of no use.
 - The last-used time is updated at most once every 60 seconds, so not every request writes to the database.
+- When an account is disabled, all of its tokens are invalidated together: even if it is restored later, the tokens from before (including the one on a lost phone) don't come back, and the person signs in again. A disabled person who still has the page open is first asked to sign in again on their next action, and only then sees "account unavailable".
+- The admin page can sign a person out of every device (`DELETE /admin/users/<id>/sessions`), for example when their phone is lost. The account is not disabled.
 
 When Google can't be reached and verification is impossible, the answer is 503, not 401: that doesn't mean the token is forged, and the frontend shouldn't sign the user out.
 
@@ -484,7 +510,18 @@ Permissions nest: administrator ⊃ moderator ⊃ regular user.
 The admin page has two more safeguards:
 
 - Nobody can change their own role or status. If the only administrator demoted or disabled themselves, nobody could undo it.
-- The account named by the `FIRST_ADMIN_EMAIL` setting is put back to an approved administrator every time it signs in. It skips review and can never be locked out by someone else.
+- The account named by the `FIRST_ADMIN_EMAIL` setting becomes an approved administrator at sign-in only while the forum has no administrator at all. Once there is one, it is like any other account: if another administrator disables or demotes it, signing in again does not restore it. That is what makes it possible to lock the account out if it is ever stolen. The cost: if other administrators exist but none of them can get in (say another administrator demoted it and then walked away), the forum itself offers no way back, and the role has to be fixed directly in the database.
+- Moderators and administrators are always approved accounts. The backend checks this when an account is changed, and the database has a cross-column constraint too (`role = 'member' OR status = 'approved'`), so not even a direct database edit can produce "a disabled moderator". The constraint is added at start-up: first it applies only to rows written from then on, then the existing rows are checked separately; if existing rows don't satisfy it, only a log line is written, so the service still starts.
+
+### Why Changing an Account Sends "What It Looked Like Before"
+
+Each row on the admin page is the data as of the moment it loaded. With two people on the admin page at once, saving from a stale page would write back over someone else's change, such as setting a just-disabled person back to approved.
+
+So `PUT /admin/users/<id>` carries `expected`: the name, unit number, role and status the page loaded. The backend locks that row first (`SELECT … FOR UPDATE`) and compares; if they differ it answers 409 `member_changed`, and the page reloads the list. Locking before checking also leaves no gap between "may this be changed" and the write: if a moderator saves at the very moment an administrator makes the same person an administrator, the moderator can't change them back. A request without `expected` comes from a page older than this check and also gets 409, asking for a reload.
+
+### Why Editing Announcements and Posts Sends a Version Number
+
+Announcements and posts each have a version number (`version`) that goes up by one with every edit. An edit carries the version the editor saw when opening the edit page; if someone else changed it meanwhile (say the author and a moderator editing at once), the versions don't match and the answer is 409 `edit_conflict`, instead of silently overwriting the copy saved first. The text typed on the page stays, so the user can copy it before reloading.
 
 ### How Hammering the API and Flooding Posts Are Stopped
 
@@ -495,13 +532,17 @@ Every limit is counted per account (`auth_utils/guard.py`). Counted site-wide, o
 | Request rate | 120 requests per minute | Kept in memory; every request carrying a session token counts once |
 | Posts | 5 per 10 minutes, 30 per day | Counts the person's recent posts in the database |
 | Replies | 20 per 10 minutes, 200 per day | Same |
+| Announcements (moderators) | 5 per 10 minutes, 20 per day | Same |
+| Document uploads (moderators) | 10 per 10 minutes, 50 per day, at most 200 MB in total per day | Counts the `document_uploads` table |
 | Session tokens | At most 10 per account | The oldest are invalidated at sign-in |
+| Sign-ins | 30 per minute from one source; 10 per 10 minutes per Google account | Kept in memory |
 
 - Going over returns 429 and says how long to wait. Being limited only blocks the action for a while; it never disables the account. Disabling an account is done by a moderator or administrator on the admin page.
 - The request rate is kept in memory, not in the database: every request passes through this gate, and writing a row each time to save resources would cost more. A restart resets the counts, which only starts a fresh minute. The cost is that the service can run only one process.
-- Post counts come straight from the database with no separate bookkeeping, so a restart doesn't reset them.
-- Administrators are exempt from the request-rate and posting limits: if the only administrator were locked out by the system, nobody could deal with it.
-- Requests without a session aren't counted here. They can't reach any data and are stopped at the first gate (401).
+- Post counts come straight from the database with no separate bookkeeping, so a restart doesn't reset them. Before counting, the backend takes that person's lock (a PostgreSQL advisory lock), so several posts sent by one person at the same moment go one at a time; otherwise each would count "not over yet" and all would be written. The lock is taken only after the request body has been read: reading it means waiting for the browser to finish sending, which can take seconds on mobile data, and that wait must not happen while holding the lock. A quick check without the lock runs before reading, so someone already over the limit doesn't have to finish sending. Measured: with a limit of 2 and 8 sent at once, all 8 got in without the lock and only 2 with it.
+- The announcement and upload limits are for moderators. Without them, one moderator could fill Neon's free 0.5 GB with announcement pictures within minutes, or fill the Google Drive of the account that holds the documents (whose storage is shared with that person's email). An upload first records a row in `document_uploads` to claim its place, then saves the file; if saving fails, the row is removed.
+- Administrators are exempt from the request-rate and write limits: if the only administrator were locked out by the system, nobody could deal with it.
+- Of the requests without a session, only `/auth/login` reaches the database, so it has its own limit. The service sits behind a proxy, so "one source" means the address the proxy appends at the end of `X-Forwarded-For`; the earlier entries come from the request itself and can be made up, so they are not used.
 
 ### Why Bodies Are Stored as Plain Text
 
@@ -550,7 +591,11 @@ So to have a different Google account hold the documents, the new owner prepares
 
 ### Where Pictures Are Stored
 
-Announcements and posts can each carry up to five pictures. Each is shrunk to a 480p JPEG in the browser before upload; the backend only checks the count, the size and the file signature, and does no image processing.
+Announcements and posts can each carry up to five pictures. Each is shrunk to a 480p JPEG in the browser before upload.
+
+The backend doesn't assume a picture has been processed: anyone can skip the web page and call the API directly with an original photo that carries its location. So every picture is decoded on the server, turned upright according to its EXIF orientation tag, and saved again as a JPEG from its pixels alone (`imaging.py`, using Pillow). What is stored carries no EXIF, comments or colour profile. Before decoding, the size the picture claims is checked, and anything over 4 megapixels or 8000 pixels on either side is refused: a picture with a tiny file but enormous dimensions would take gigabytes of memory to decode, and with only 512 MB and several requests at a time the limit can't be generous (a 480p panorama at 480 × 8000 is 3.84 megapixels, still within it).
+
+Picture responses may be kept by the browser for an hour (`Cache-Control: private, max-age=3600`) and carry `Vary: Authorization`: after a post is deleted or an account disabled, a picture left in the browser expires within an hour, and when another account signs in on the same computer the browser has to ask the server again, which checks permission again.
 
 Pictures are stored in the database (the `stored_pictures` table), not in Google Drive. Attaching a picture is something every resident does when posting: with the pictures in the database, posting doesn't wait on an outside service and can't fail because that service is having trouble. A shrunk picture is only a few dozen KB, which the database carries easily.
 
@@ -589,11 +634,12 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 | `config.py` | The single place settings are read |
 | `errors.py` | The uniform error format: `{"error": message, "code": code}` |
 | `validation.py` | Input checks |
+| `imaging.py` | Re-saving pictures on the server: turning them upright, dropping metadata, refusing oversized dimensions |
 | `auth_utils/google_auth.py` | Verifies Google's ID Token |
 | `auth_utils/sessions.py` | The forum's own session tokens |
 | `auth_utils/access.py` | Permission rules |
-| `auth_utils/guard.py` | Abuse limits: request rate, posting counts, session token count |
-| `db/` | Connection, table creation (`schema.py`), and reads and writes per table; picture contents are in `pictures.py` |
+| `auth_utils/guard.py` | Abuse limits: request rate, write counts, sign-in counts, session token count |
+| `db/` | Connection, table creation and added columns (`schema.py`), and reads and writes per table; picture contents are in `pictures.py`, the upload records in `uploads.py` |
 | `documents/` | Listing, downloading, uploading and deleting documents: `google_drive.py`, `local_folder.py` |
 | `tools/apps_script/documents.gs` | The Apps Script that puts documents into Google Drive on the backend's behalf |
 | `tools/local_db.sh` | PostgreSQL for local development |
@@ -603,8 +649,9 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 ### Known Limitations
 
 - Any Google account can sign in and submit a registration. If someone abuses it, a moderator or administrator disables them.
-- The rate and count limits apply only to signed-in people. A flood of requests without a session (hammering the sign-in route, say) isn't stopped here and relies on whatever protection sits in front of the host.
-- There is no database migration tool. On start-up the service only creates tables that don't exist yet; changing an existing table means writing and running SQL by hand.
+- Of the requests without a session, only `/auth/login` is limited; the rest relies on whatever protection sits in front of the host. If the address the proxy appends at the end of `X-Forwarded-For` is actually another proxy's, many people count as one source; 30 per minute is deliberately generous for that case.
+- There is no database migration tool. On start-up the service creates the tables that don't exist yet and runs the repeatable `MIGRATIONS` in `db/schema.py` (added columns and constraints); changes such as altering a column type still mean writing and running SQL by hand.
+- The request rate and sign-in counts are kept in memory and reset when the service restarts or sleeps.
 - The document list is fetched from Google Drive every time, with no cache.
 - There are no notifications (no email when a registration is approved), no search, and no audit log.
 - The pictures of an announcement or post can only be chosen when it is created and can't be replaced afterwards; to change them, delete it and write it again.
@@ -751,19 +798,20 @@ Errors are always `{"error": "message for people", "code": "code"}`.
 | `POST /auth/logout` | Anyone | Invalidates the token sent with the request |
 | `GET /auth/status` | Signed in | The current status and role |
 | `POST /auth/register` | Signed in, no account yet | Submits a display name and unit number, creating an account under review |
-| `GET /announcements`, `GET /announcements/<id>` | Approved | The announcement list; one announcement |
+| `GET /announcements`, `GET /announcements/<id>` | Approved | The announcement list; one announcement. An announcement carries `author_role` (the author's current role) and `version` (to be sent back when editing) |
 | `GET /announcements/<id>/images/<picture number>` | Approved | One picture of an announcement |
 | `POST /announcements` | Moderator, administrator | Create an announcement, with up to five pictures |
-| `PUT /announcements/<id>`, `DELETE /announcements/<id>` | Moderator, administrator | Edit and delete an announcement |
+| `PUT /announcements/<id>`, `DELETE /announcements/<id>` | Moderator, administrator | Edit and delete an announcement. An edit carries `version`; a mismatch answers 409 `edit_conflict` |
 | `GET /posts`, `GET /posts/<id>` | Approved | The post list; one post with its replies |
 | `POST /posts` | Approved | Create a post, with up to five pictures |
 | `GET /posts/<id>/images/<picture number>` | Approved | One picture of a post |
-| `PUT /posts/<id>`, `DELETE /posts/<id>` | The author, moderator, administrator | Edit and delete a post |
+| `PUT /posts/<id>`, `DELETE /posts/<id>` | The author, moderator, administrator | Edit and delete a post. An edit carries `version`; a mismatch answers 409 `edit_conflict` |
 | `POST /posts/<id>/replies` | Approved | Reply |
 | `DELETE /replies/<id>` | The author, moderator, administrator | Delete a reply |
 | `GET /documents`, `GET /documents/<file_id>/download` | Approved | The document list; download |
 | `GET /admin/users` | Moderator, administrator | The member list |
-| `PUT /admin/users/<id>` | Moderator, administrator | Change display name, unit number, role and status |
+| `PUT /admin/users/<id>` | Moderator, administrator | Change display name, unit number, role and status. Carries `expected` (the four fields as the page loaded them); a mismatch answers 409 `member_changed`. Disabling invalidates all of the person's session tokens |
+| `DELETE /admin/users/<id>/sessions` | Moderator, administrator (moderators can't use it on administrators) | Signs the person out of every device; answers `{"revoked": number of tokens invalidated}` |
 | `GET /admin/documents` | Moderator, administrator | Whether the admin page can upload documents, and the size limit per file |
 | `POST /admin/documents` | Moderator, administrator | Upload a document: `multipart/form-data`, field name `file`, at most 10 MB. A file with the same name is replaced |
 | `DELETE /admin/documents/<file_id>` | Moderator, administrator | Delete a document |

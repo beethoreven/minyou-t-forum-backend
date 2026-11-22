@@ -17,7 +17,7 @@ import validation
 from auth_utils import access, guard, sessions
 from auth_utils.google_auth import GoogleIdentity, VerificationUnavailable, make_verifier
 from config import Config, ConfigError, load_config
-from db import announcements, pictures, posts, users
+from db import announcements, pictures, posts, uploads, users
 from db.connection import connect
 from db.schema import ensure_schema
 from documents.base import DocumentFile, DocumentsUnavailable
@@ -74,6 +74,11 @@ def create_app(
     # 每個帳號每分鐘能送幾個請求（規則在 auth_utils/guard.py）。
     limiter = guard.RateLimiter(guard.REQUESTS_PER_MINUTE, guard.WINDOW_SECONDS)
     app.extensions["rate_limiter"] = limiter
+    # 登入的次數：同一個來源、同一個 Google 帳號各算各的。
+    login_attempts = guard.RateLimiter(guard.LOGIN_ATTEMPTS_PER_MINUTE, guard.WINDOW_SECONDS)
+    logins_per_account = guard.RateLimiter(guard.LOGINS_PER_ACCOUNT, guard.LOGIN_ACCOUNT_WINDOW_SECONDS)
+    app.extensions["login_attempts"] = login_attempts
+    app.extensions["logins_per_account"] = logins_per_account
 
     def signed_in(conn) -> access.Account:
         """這個請求是誰發的。每個帶登入憑證的請求都會經過這裡，所以順便在這裡算他的請求數。"""
@@ -88,6 +93,20 @@ def create_app(
 
     def member(conn) -> dict:
         return access.require_member(signed_in(conn))
+
+    def check_writes(conn, author: dict, count_since, limits, noun: str, *, lock: bool) -> None:
+        """這個人能不能再寫一筆（管理員不限）。
+
+        寫入的路由檢查兩次：讀請求內容之前先看一次（lock=False），已經超過的人不用把內容傳完、
+        圖片也不用解開；讀完之後、真的寫入之前，拿著這個人的寫入鎖再看一次（lock=True），
+        同時送出的好幾個請求才不會都數到「還沒超過」。讀請求內容要等瀏覽器傳完，可能很久，
+        所以不能在拿著鎖的時候讀。
+        """
+        if author["role"] == "admin":
+            return
+        if lock:
+            guard.lock_writer(conn, author["id"])
+        guard.check_write_limits(lambda seconds: count_since(conn, author["id"], seconds), limits, noun)
 
     def staff(conn) -> dict:
         return access.require_staff(signed_in(conn))
@@ -111,15 +130,21 @@ def create_app(
         }
 
     def entry_json(row: dict) -> dict:
-        """公告與文章的完整內容，兩者欄位相同。"""
+        """公告與文章的完整內容，兩者欄位相同。
+
+        author_role 是作者現在的角色，畫面用它在版主與管理員的名字旁邊標出角色，
+        別人取了「管理員」這種名字也冒充不了。version 是編輯時要帶回來的版本號。
+        """
         return {
             "id": row["id"],
             "title": row["title"],
             "body": row["body"],
             "author_id": row["author_id"],
             "author_name": row["author_name"],
+            "author_role": row["author_role"],
             "created_at": iso_utc(row["created_at"]),
             "updated_at": iso_utc(row["updated_at"]),
+            "version": row["version"],
         }
 
     def reply_json(row: dict) -> dict:
@@ -128,6 +153,7 @@ def create_app(
             "body": row["body"],
             "author_id": row["author_id"],
             "author_name": row["author_name"],
+            "author_role": row["author_role"],
             "created_at": iso_utc(row["created_at"]),
         }
 
@@ -154,8 +180,11 @@ def create_app(
             content,
             mimetype="image/jpeg",
             headers={
-                # 一張圖存進去之後就不會再變，瀏覽器可以一直留著，不用每次重新抓。
-                "Cache-Control": "private, max-age=31536000, immutable",
+                # 瀏覽器可以留一小時，不用每次重新抓。不能留更久：文章刪掉、帳號停用之後，
+                # 留在瀏覽器裡的圖還拿得到。Vary 讓瀏覽器只把它給帶著同一張登入憑證的請求，
+                # 同一台電腦換另一個帳號登入就要重新向伺服器要，伺服器會重新檢查權限。
+                "Cache-Control": "private, max-age=3600",
+                "Vary": "Authorization",
                 # 一律當成圖片處理，瀏覽器不要自己猜它是不是別種檔案。
                 "X-Content-Type-Options": "nosniff",
             },
@@ -181,12 +210,19 @@ def create_app(
             "modified_time": iso_utc(file.modified_time),
         }
 
-    def entry_input() -> tuple[str, str]:
-        """修改公告或文章時送來的內容：標題與內文。附圖發出去之後就不能換。"""
+    def entry_input(noun: str) -> tuple[str, str, int]:
+        """修改公告或文章時送來的內容：標題、內文，以及打開編輯頁時看到的版本號。
+
+        附圖發出去之後就不能換。沒帶版本號的是改版之前的舊畫面，一律請他重新整理，
+        不然看不出他是不是在蓋掉別人剛改好的內容。
+        """
         data = validation.json_object(request)
         title = validation.text_field(data, "title", "標題", validation.TITLE_MAX)
         body = validation.text_field(data, "body", "內文", validation.BODY_MAX)
-        return title, body
+        version = validation.version_field(data)
+        if version is None:
+            raise edit_conflict(noun)
+        return title, body, version
 
     def new_entry_input() -> tuple[str, str, list[bytes]]:
         """新增公告或文章時送來的內容：標題、內文，以及附圖（可以沒有）。"""
@@ -202,6 +238,16 @@ def create_app(
 
     def post_not_found() -> ApiError:
         return ApiError(404, "post_not_found", "找不到這篇文章，可能已經被刪除")
+
+    def edit_conflict(noun: str) -> ApiError:
+        return ApiError(
+            409,
+            "edit_conflict",
+            f"這{noun}在你編輯的期間被改過了。請先把你改的內容複製起來，重新整理後再改一次",
+        )
+
+    def member_changed() -> ApiError:
+        return ApiError(409, "member_changed", "這位成員的資料剛剛被改過，請重新整理後再改")
 
     def document_not_found() -> ApiError:
         return ApiError(404, "document_not_found", "找不到這份文件，可能已經被移除")
@@ -235,6 +281,10 @@ def create_app(
         任何 Google 帳號都能登入：還沒註冊的人要先登入，才能填註冊表單。
         登入不代表能用論壇，能不能用是每個請求另外檢查的。
         """
+        # 還沒驗證之前先算來源的次數：驗證不過的請求也算，免得有人一直送假的憑證。
+        retry_after = login_attempts.hit(guard.client_ip(request))
+        if retry_after is not None:
+            raise guard.rate_limited(retry_after)
         id_token = validation.json_object(request).get("id_token")
         if not isinstance(id_token, str) or not id_token:
             raise ApiError(400, "id_token_required", "缺少 Google 的登入憑證")
@@ -245,6 +295,10 @@ def create_app(
             raise ApiError(503, "google_unavailable", "暫時無法向 Google 確認登入，請稍後再試") from None
         if identity is None:
             raise ApiError(401, "invalid_google_token", "Google 登入沒有成功，請再試一次")
+        # 同一個 Google 帳號短時間內一直登入，每次都會多一張憑證，也擋下來。
+        retry_after = logins_per_account.hit(identity.email)
+        if retry_after is not None:
+            raise guard.rate_limited(retry_after)
 
         with db() as conn:
             if identity.email == config.first_admin_email:
@@ -312,9 +366,13 @@ def create_app(
 
     @app.post("/announcements")
     def create_announcement():
+        limits = (announcements.count_since, guard.ANNOUNCEMENT_LIMITS, "則公告")
         with db() as conn:
             author = staff(conn)
-            title, body, images = new_entry_input()
+            check_writes(conn, author, *limits, lock=False)
+        title, body, images = new_entry_input()
+        with db() as conn:
+            check_writes(conn, author, *limits, lock=True)
             # 公告、圖片、兩者的對應在同一筆交易裡寫入：要嘛全部成功，要嘛什麼都沒有留下。
             new_id = announcements.create(conn, title, body, author["id"])
             announcements.add_images(conn, new_id, pictures.save(conn, images))
@@ -332,9 +390,11 @@ def create_app(
     def update_announcement(announcement_id: int):
         with db() as conn:
             staff(conn)
-            title, body = entry_input()
-            if not announcements.update(conn, announcement_id, title, body):
+            if announcements.get(conn, announcement_id) is None:
                 raise announcement_not_found()
+            title, body, version = entry_input("則公告")
+            if not announcements.update(conn, announcement_id, title, body, version):
+                raise edit_conflict("則公告")
             return announcement_json(conn, announcements.get(conn, announcement_id))
 
     @app.delete("/announcements/<id:announcement_id>")
@@ -361,6 +421,7 @@ def create_app(
                 "id": row["id"],
                 "title": row["title"],
                 "author_name": row["author_name"],
+                "author_role": row["author_role"],
                 "created_at": iso_utc(row["created_at"]),
                 "reply_count": row["reply_count"],
             }
@@ -379,15 +440,13 @@ def create_app(
 
     @app.post("/posts")
     def create_post():
+        limits = (posts.count_posts_since, guard.POST_LIMITS, "篇文章")
         with db() as conn:
             author = member(conn)
-            if author["role"] != "admin":
-                guard.check_write_limits(
-                    lambda seconds: posts.count_posts_since(conn, author["id"], seconds),
-                    guard.POST_LIMITS,
-                    "篇文章",
-                )
-            title, body, images = new_entry_input()
+            check_writes(conn, author, *limits, lock=False)
+        title, body, images = new_entry_input()
+        with db() as conn:
+            check_writes(conn, author, *limits, lock=True)
             # 文章、圖片、兩者的對應在同一筆交易裡寫入：要嘛全部成功，要嘛什麼都沒有留下。
             new_id = posts.create(conn, title, body, author["id"])
             posts.add_images(conn, new_id, pictures.save(conn, images))
@@ -405,12 +464,14 @@ def create_app(
     def update_post(post_id: int):
         with db() as conn:
             user = member(conn)
-            title, body = entry_input()
             row = posts.get(conn, post_id)
             if row is None:
                 raise post_not_found()
+            # 先確認他能不能改，再看他送來的內容：沒有權限的人一律是 403。
             access.require_owner_or_staff(user, row["author_id"])
-            posts.update(conn, post_id, title, body)
+            title, body, version = entry_input("篇文章")
+            if not posts.update(conn, post_id, title, body, version):
+                raise edit_conflict("篇文章")
             return post_json(conn, posts.get(conn, post_id))
 
     @app.delete("/posts/<id:post_id>")
@@ -429,16 +490,14 @@ def create_app(
 
     @app.post("/posts/<id:post_id>/replies")
     def create_reply(post_id: int):
+        limits = (posts.count_replies_since, guard.REPLY_LIMITS, "則回覆")
         with db() as conn:
             author = member(conn)
-            if author["role"] != "admin":
-                guard.check_write_limits(
-                    lambda seconds: posts.count_replies_since(conn, author["id"], seconds),
-                    guard.REPLY_LIMITS,
-                    "則回覆",
-                )
-            data = validation.json_object(request)
-            body = validation.text_field(data, "body", "回覆", validation.REPLY_MAX)
+            check_writes(conn, author, *limits, lock=False)
+        data = validation.json_object(request)
+        body = validation.text_field(data, "body", "回覆", validation.REPLY_MAX)
+        with db() as conn:
+            check_writes(conn, author, *limits, lock=True)
             reply_id = posts.create_reply(conn, post_id, body, author["id"])
             if reply_id is None:
                 raise post_not_found()
@@ -511,15 +570,36 @@ def create_app(
         # 要在讀請求的內容之前放寬，放寬的只有這一個請求。
         request.max_content_length = MAX_DOCUMENT_BYTES + UPLOAD_OVERHEAD_BYTES
         with db() as conn:
-            staff(conn)
+            uploader = staff(conn)
         if not documents.can_upload:
             raise upload_unavailable()
         name, content = validation.uploaded_file(request, MAX_DOCUMENT_BYTES)
+
+        # 先記下這次上傳（佔一個名額），再去存檔。同一個人同時傳好幾個時，後面的人數得到
+        # 前面已經佔掉的名額。管理員不受限制，但一樣記下來。
+        with db() as conn:
+            check_writes(conn, uploader, uploads.count_since, guard.UPLOAD_LIMITS, "個檔案", lock=True)
+            if uploader["role"] != "admin":
+                guard.check_total_bytes(
+                    uploads.bytes_since(conn, uploader["id"], 86400),
+                    len(content),
+                    guard.UPLOAD_BYTES_PER_DAY,
+                    "一天",
+                )
+            upload_id = uploads.record(conn, uploader["id"], len(content))
+
         # 存檔可能要連到外面的服務、等上好幾秒，所以不在資料庫連線開著的時候做。
+        saved = False
         try:
             documents.save(name, content)
+            saved = True
         except DocumentsUnavailable as error:
             raise documents_not_writable(error) from None
+        finally:
+            # 不管是哪一種原因沒有存成功，佔掉的名額都還回去。
+            if not saved:
+                with db() as conn:
+                    uploads.forget(conn, upload_id)
         return {"name": name}, 201
 
     @app.delete("/admin/documents/<file_id>")
@@ -547,6 +627,11 @@ def create_app(
     def admin_update_user(user_id: int):
         """改一個成員的名稱、戶號、角色、狀態。審核就是把狀態從審核中改成已審核。
 
+        請求要帶 expected：畫面載入時看到的名稱、戶號、角色、狀態。跟資料庫現在的不一樣，
+        代表這段期間被別人改過（例如剛被停用），回 409，不要用畫面上舊的值蓋回去。
+
+        停用一個帳號時，順便讓他在每一台裝置上登出。
+
         回應裡的 changed 說這次有沒有真的改到東西，畫面用它決定要顯示「已儲存」還是「沒有修改」。
         """
         with db() as conn:
@@ -558,15 +643,36 @@ def create_app(
                 "role": validation.choice_field(data, "role", "角色", users.ROLES),
                 "status": validation.choice_field(data, "status", "狀態", users.STATUSES),
             }
-            target = users.get(conn, user_id)
+            expected = validation.expected_member(data)
+            # 鎖住這一筆再檢查：檢查完、寫入前，別人沒辦法插進來改它。
+            target = users.get_for_update(conn, user_id)
             if target is None:
                 raise ApiError(404, "user_not_found", "找不到這位成員")
+            if expected is None or any(expected[key] != target[key] for key in validation.MEMBER_FIELDS):
+                raise member_changed()
             access.check_can_manage(actor, target, new["role"], new["status"])
             changed = any(new[key] != target[key] for key in new)
             if changed:
                 users.update(conn, user_id, **new)
+            if new["status"] == "disabled" and target["status"] != "disabled":
+                sessions.delete_for_email(conn, target["email"])
             item = users.get(conn, user_id)
         return {"changed": changed, "item": member_json(item)}
+
+    @app.delete("/admin/users/<id:user_id>/sessions")
+    def admin_sign_out_everywhere(user_id: int):
+        """讓一個成員在每一台裝置上登出（作廢他所有的登入憑證）。回應說作廢了幾張。
+
+        例如他的手機掉了。帳號不會被停用，他重新用 Google 登入就能再用。
+        """
+        with db() as conn:
+            actor = staff(conn)
+            target = users.get(conn, user_id)
+            if target is None:
+                raise ApiError(404, "user_not_found", "找不到這位成員")
+            access.check_can_touch(actor, target)
+            revoked = sessions.delete_for_email(conn, target["email"])
+        return {"revoked": revoked}
 
     return app
 

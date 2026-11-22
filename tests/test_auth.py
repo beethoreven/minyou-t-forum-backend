@@ -1,9 +1,13 @@
 """登入、註冊審核、角色權限、後台。"""
 
+import threading
+import time
+
 import psycopg
 import pytest
 
-from conftest import ADMIN_EMAIL
+from conftest import ADMIN_EMAIL, member_fields
+from db.schema import ensure_schema
 
 PROFILE = {"display_name": "王小明", "unit_no": "A-5"}
 ENTRY = {"title": "標題", "body": "內文"}
@@ -15,6 +19,11 @@ def code_of(response) -> str:
 
 def member_update(role="member", status="approved", **extra) -> dict:
     return {"display_name": "住戶", "unit_no": "A-1", "role": role, "status": status} | extra
+
+
+def with_expected(config, user_id, update: dict) -> dict:
+    """在要改的內容裡附上這位成員現在的樣子（後台畫面載入時看到的）。"""
+    return update | {"expected": member_fields(config.database_url, user_id)}
 
 
 # ── 登入 ──────────────────────────────────────────────────
@@ -36,6 +45,7 @@ def member_update(role="member", status="approved", **extra) -> dict:
         ("get", "/documents/0123456789abcdef/download"),
         ("get", "/admin/users"),
         ("put", "/admin/users/1"),
+        ("delete", "/admin/users/1/sessions"),
         ("get", "/admin/documents"),
     ],
 )
@@ -124,7 +134,11 @@ def test_register_then_wait_for_review(sign_in, client):
     assert listed[0]["email"] == "resident@example.com"
     assert listed[0]["status"] == "pending"
     assert listed[0]["unit_no"] == "A-5"
-    approved = client.put(f"/admin/users/{listed[0]['id']}", json=PROFILE | {"role": "member", "status": "approved"})
+    expected = {key: listed[0][key] for key in ("display_name", "unit_no", "role", "status")}
+    approved = client.put(
+        f"/admin/users/{listed[0]['id']}",
+        json=PROFILE | {"role": "member", "status": "approved", "expected": expected},
+    )
     assert approved.get_json()["changed"] is True
 
     assert resident.get("/posts").status_code == 200
@@ -158,17 +172,28 @@ def test_register_validates_input(sign_in, payload, code):
     assert resident.get("/auth/status").get_json()["state"] == "unregistered"
 
 
-def test_disabling_takes_effect_on_the_next_request(add_member, client):
+def test_disabling_signs_out_every_device(add_member, sign_in, edit_member, client):
     resident = add_member("resident@example.com")
+    phone = sign_in("resident@example.com")  # 同一個人的另一台裝置
     assert resident.get("/posts").status_code == 200
 
-    client.put(f"/admin/users/{resident.user_id}", json=member_update(status="disabled"))
+    assert edit_member(client, resident.user_id, status="disabled").status_code == 200
 
-    blocked = resident.get("/posts")  # 同一張憑證，下一個請求就被擋
-    assert blocked.status_code == 403
-    assert code_of(blocked) == "disabled"
-    assert resident.get("/auth/status").get_json()["state"] == "disabled"
-    assert code_of(resident.post("/auth/register", json=PROFILE)) == "already_registered"  # 不能重新註冊復活
+    # 兩台裝置的憑證都作廢了
+    for device in (resident, phone):
+        assert device.get("/posts").status_code == 401
+        assert device.get("/auth/status").status_code == 401
+
+    # 重新用 Google 登入看得到自己被停用，也不能重新註冊復活
+    again = sign_in("resident@example.com")
+    assert again.get("/auth/status").get_json()["state"] == "disabled"
+    assert code_of(again.get("/posts")) == "disabled"
+    assert code_of(again.post("/auth/register", json=PROFILE)) == "already_registered"
+
+    # 恢復之後，停用前的舊憑證也不會跟著復活：要重新登入
+    assert edit_member(client, resident.user_id, status="approved").status_code == 200
+    assert resident.get("/posts").status_code == 401
+    assert again.get("/posts").status_code == 200  # 停用期間重新登入的那一張還能用
 
 
 # ── 角色權限 ──────────────────────────────────────────────
@@ -190,6 +215,7 @@ def test_member_can_read_and_post_but_not_announce(add_member, client):
         resident.get("/admin/users"),
         resident.get("/admin/documents"),
         resident.put(f"/admin/users/{resident.user_id}", json=member_update(role="admin")),
+        resident.delete(f"/admin/users/{resident.user_id}/sessions"),
     ):
         assert response.status_code == 403
         assert code_of(response) == "forbidden"
@@ -213,78 +239,232 @@ def test_only_the_author_or_staff_can_change_a_post(add_member, client):
         assert response.status_code == 403
         assert code_of(response) == "forbidden"
 
-    assert author.put(f"/posts/{post['id']}", json={"title": "作者改的", "body": "內文"}).status_code == 200
-    assert moderator.put(f"/posts/{post['id']}", json={"title": "版主改的", "body": "內文"}).status_code == 200
+    edited = author.put(f"/posts/{post['id']}", json={"title": "作者改的", "body": "內文", "version": post["version"]})
+    assert edited.status_code == 200
+    edit_again = {"title": "版主改的", "body": "內文", "version": edited.get_json()["version"]}
+    assert moderator.put(f"/posts/{post['id']}", json=edit_again).status_code == 200
     assert moderator.delete(f"/replies/{reply['id']}").status_code == 204
     assert client.delete(f"/posts/{post['id']}").status_code == 204
 
 
-def test_moderator_can_announce_and_review_but_not_touch_admins(add_member, sign_in, client):
+def test_moderator_can_announce_and_review_but_not_touch_admins(add_member, sign_in, edit_member, client):
     moderator = add_member("moderator@example.com", role="moderator")
     assert moderator.post("/announcements", json=ENTRY).status_code == 201
 
     applicant = sign_in("applicant@example.com")
     applicant_id = applicant.post("/auth/register", json=PROFILE).get_json()["user"]["id"]
-    assert moderator.put(f"/admin/users/{applicant_id}", json=member_update()).status_code == 200
+    assert edit_member(moderator, applicant_id, status="approved").status_code == 200
     assert applicant.get("/posts").status_code == 200
-    assert moderator.put(f"/admin/users/{applicant_id}", json=member_update(role="moderator")).status_code == 200
+    assert edit_member(moderator, applicant_id, role="moderator").status_code == 200
 
-    # 不能改管理員的帳號，也不能把別人變成管理員
-    touch_admin = moderator.put(f"/admin/users/{client.user_id}", json=member_update(role="admin", display_name="改名"))
+    # 不能改管理員的帳號，也不能把別人變成管理員，也不能讓管理員登出所有裝置
+    touch_admin = edit_member(moderator, client.user_id, display_name="改名")
     assert touch_admin.status_code == 403
     assert code_of(touch_admin) == "cannot_change_admin"
-    grant_admin = moderator.put(f"/admin/users/{applicant_id}", json=member_update(role="admin"))
+    grant_admin = edit_member(moderator, applicant_id, role="admin")
     assert grant_admin.status_code == 403
     assert code_of(grant_admin) == "cannot_grant_admin"
+    sign_out_admin = moderator.delete(f"/admin/users/{client.user_id}/sessions")
+    assert sign_out_admin.status_code == 403
+    assert code_of(sign_out_admin) == "cannot_change_admin"
+    assert client.get("/auth/status").status_code == 200
 
     # 管理員可以
-    assert client.put(f"/admin/users/{applicant_id}", json=member_update(role="admin")).status_code == 200
+    assert edit_member(client, applicant_id, role="admin").status_code == 200
 
 
-def test_nobody_can_change_their_own_role_or_status(add_member, client):
+def test_nobody_can_change_their_own_role_or_status(add_member, edit_member, client):
     moderator = add_member("moderator@example.com", role="moderator")
-    for who, update in (
-        (client, member_update(role="member")),
-        (client, member_update(role="admin", status="disabled")),
-        (moderator, member_update(role="member")),
+    for who, changes in (
+        (client, {"role": "member"}),
+        (client, {"status": "disabled"}),
+        (moderator, {"role": "member"}),
     ):
-        response = who.put(f"/admin/users/{who.user_id}", json=update)
+        response = edit_member(who, who.user_id, **changes)
         assert response.status_code == 403
         assert code_of(response) == "cannot_change_self"
 
-    renamed = client.put(f"/admin/users/{client.user_id}", json=member_update(role="admin", display_name="新名字"))
+    renamed = edit_member(client, client.user_id, display_name="新名字")
     assert renamed.status_code == 200  # 改自己的名稱可以
     assert renamed.get_json()["item"]["display_name"] == "新名字"
 
 
-def test_admin_update_rules(add_member, client):
+def test_admin_update_rules(add_member, edit_member, client):
     resident = add_member("resident@example.com")
-    path = f"/admin/users/{resident.user_id}"
 
-    unchanged = client.put(path, json=member_update())
+    unchanged = edit_member(client, resident.user_id)
     assert unchanged.status_code == 200
     assert unchanged.get_json()["changed"] is False
 
-    for update, code in (
-        (member_update(status="pending"), "status_invalid"),  # 不能改回審核中
-        (member_update(role="moderator", status="disabled"), "role_requires_approved"),
-        (member_update(role="owner"), "role_invalid"),
-        (member_update(status="banned"), "status_invalid"),
-        (member_update(display_name=""), "display_name_required"),
+    for changes, code in (
+        ({"status": "pending"}, "status_invalid"),  # 不能改回審核中
+        ({"role": "moderator", "status": "disabled"}, "role_requires_approved"),
+        ({"role": "owner"}, "role_invalid"),
+        ({"status": "banned"}, "status_invalid"),
+        ({"display_name": ""}, "display_name_required"),
+        ({"expected": {"display_name": 1}}, "expected_invalid"),
     ):
-        response = client.put(path, json=update)
-        assert response.status_code == 400, update
+        response = edit_member(client, resident.user_id, **changes)
+        assert response.status_code == 400, changes
         assert code_of(response) == code
 
-    missing = client.put("/admin/users/99999", json=member_update())
+    missing = edit_member(client, 99999)
     assert missing.status_code == 404
     assert code_of(missing) == "user_not_found"
 
 
-def test_first_admin_is_restored_at_login(add_member, sign_in, client):
+def test_a_stale_admin_page_cannot_undo_a_change(add_member, edit_member, config, client):
+    """畫面是別人改之前載入的：送出時帶的 expected 對不上，不能用舊的值蓋回去。"""
+    resident = add_member("resident@example.com")
+    moderator = add_member("moderator@example.com", role="moderator")
+    stale = member_fields(config.database_url, resident.user_id)  # 版主的畫面在這時候載入
+
+    assert edit_member(client, resident.user_id, status="disabled").status_code == 200  # 管理員停用他
+
+    # 版主用沒重新整理的畫面，只改了名字就按儲存
+    response = moderator.put(
+        f"/admin/users/{resident.user_id}",
+        json=stale | {"display_name": "改個名字", "expected": stale},
+    )
+    assert response.status_code == 409
+    assert code_of(response) == "member_changed"
+    assert member_fields(config.database_url, resident.user_id)["status"] == "disabled"  # 停用還在
+
+    # 沒帶 expected 的是舊版的畫面，一樣請他重新整理
+    old_page = moderator.put(f"/admin/users/{resident.user_id}", json=stale)
+    assert old_page.status_code == 409
+    assert code_of(old_page) == "member_changed"
+
+
+def test_checking_and_writing_a_member_happen_on_a_locked_row(add_member, config, client):
+    """版主儲存的同時，管理員剛好把同一個人升成管理員：版主不能把他改回去。
+
+    模擬的方法：另外開一條連線鎖住那一筆、把他改成管理員，先不送出；版主的請求這時候要等。
+    放開之後，版主的請求看到的是改完的樣子，所以會被擋下來，而不是用舊的檢查結果寫進去。
+    """
+    resident = add_member("resident@example.com")
+    moderator = add_member("moderator@example.com", role="moderator")
+    stale = member_fields(config.database_url, resident.user_id)
+    results = []
+
+    with psycopg.connect(config.database_url) as conn:
+        conn.execute("SELECT 1 FROM users WHERE id = %s FOR UPDATE", (resident.user_id,))
+        conn.execute("UPDATE users SET role = 'admin' WHERE id = %s", (resident.user_id,))
+        worker = threading.Thread(
+            target=lambda: results.append(
+                moderator.put(
+                    f"/admin/users/{resident.user_id}",
+                    json=stale | {"display_name": "版主改的", "expected": stale},
+                )
+            )
+        )
+        worker.start()
+        time.sleep(0.5)
+        assert worker.is_alive()  # 版主的請求在等那把鎖
+    worker.join(timeout=10)
+
+    assert results[0].status_code in (403, 409)
+    assert member_fields(config.database_url, resident.user_id)["role"] == "admin"
+
+
+def test_staff_can_sign_a_member_out_everywhere(add_member, sign_in, client):
+    resident = add_member("resident@example.com")
+    phone = sign_in("resident@example.com")
+
+    response = client.delete(f"/admin/users/{resident.user_id}/sessions")
+    assert response.status_code == 200
+    assert response.get_json() == {"revoked": 2}
+    assert resident.get("/posts").status_code == 401
+    assert phone.get("/posts").status_code == 401
+
+    again = sign_in("resident@example.com")  # 帳號沒有被停用，重新登入就好
+    assert again.get("/posts").status_code == 200
+
+    missing = client.delete("/admin/users/99999/sessions")
+    assert missing.status_code == 404
+
+
+def test_first_admin_is_not_restored_once_another_admin_exists(add_member, sign_in, edit_member, client):
     second_admin = add_member("second@example.com", role="admin")
-    second_admin.put(f"/admin/users/{client.user_id}", json=member_update(role="member"))
+    assert edit_member(second_admin, client.user_id, role="member").status_code == 200
     assert client.get("/admin/users").status_code == 403
 
-    again = sign_in(ADMIN_EMAIL)  # 重新登入就恢復
-    assert again.get("/admin/users").status_code == 200
+    again = sign_in(ADMIN_EMAIL)  # 重新登入也不會自己變回管理員
+    assert again.get("/admin/users").status_code == 403
+    assert again.get("/auth/status").get_json()["user"]["role"] == "member"
+
+    assert edit_member(second_admin, client.user_id, status="disabled").status_code == 200
+    assert sign_in(ADMIN_EMAIL).get("/auth/status").get_json()["state"] == "disabled"  # 停用也鎖得住
+
+
+def test_first_admin_is_created_only_when_there_is_no_admin(sign_in, config):
+    resident = sign_in("resident@example.com")
+    resident.post("/auth/register", json=PROFILE)
+    with psycopg.connect(config.database_url) as conn:
+        assert conn.execute("SELECT count(*) FROM users WHERE role = 'admin'").fetchone()[0] == 0
+
+    admin = sign_in(ADMIN_EMAIL)  # 還沒有任何管理員：設定檔指定的這位直接是管理員
+    assert admin.get("/auth/status").get_json()["user"]["role"] == "admin"
+
+
+# ── 登入的次數 ────────────────────────────────────────────
+
+
+def test_login_attempts_are_limited_per_source(app, anonymous):
+    app.extensions["login_attempts"].limit = 3
+    from_a = {"X-Forwarded-For": "203.0.113.7"}
+    assert [anonymous.post("/auth/login", json={"id_token": "forged"}, headers=from_a).status_code for _ in range(3)] == [401] * 3
+    blocked = anonymous.post("/auth/login", json={"id_token": "google:a@example.com:A"}, headers=from_a)
+    assert blocked.status_code == 429  # 連真的憑證也先擋下
+    assert code_of(blocked) == "rate_limited"
+    assert int(blocked.headers["Retry-After"]) >= 1
+
+    # 只認代理接在最後面的那一個位址：前面亂填的換不到新的額度
+    spoofed = {"X-Forwarded-For": "198.51.100.1, 203.0.113.7"}
+    assert anonymous.post("/auth/login", json={"id_token": "forged"}, headers=spoofed).status_code == 429
+    other_source = {"X-Forwarded-For": "203.0.113.8"}
+    assert anonymous.post("/auth/login", json={"id_token": "forged"}, headers=other_source).status_code == 401
+
+
+def test_logins_are_limited_per_google_account(app, anonymous):
+    app.extensions["logins_per_account"].limit = 2
+    login = lambda email: anonymous.post("/auth/login", json={"id_token": f"google:{email}:名字"})
+    assert [login("a@example.com").status_code for _ in range(2)] == [200, 200]
+    assert login("a@example.com").status_code == 429
+    assert login("b@example.com").status_code == 200  # 別的帳號不受影響
+
+
+# ── 資料庫裡的限制 ────────────────────────────────────────
+
+
+def test_database_rejects_staff_that_is_not_approved(add_member, config):
+    moderator = add_member("moderator@example.com", role="moderator")
+    with psycopg.connect(config.database_url) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("UPDATE users SET status = 'disabled' WHERE id = %s", (moderator.user_id,))
+    with psycopg.connect(config.database_url) as conn:
+        validated = conn.execute(
+            "SELECT convalidated FROM pg_constraint WHERE conname = 'users_staff_must_be_approved'"
+        ).fetchone()[0]
+    assert validated is True
+
+
+def test_existing_bad_rows_do_not_stop_the_service_from_starting(add_member, config, caplog):
+    """正式資料庫裡如果已經有不符合的資料，啟動不能失敗；之後的寫入照樣會被擋，而且 log 裡看得到。"""
+    moderator = add_member("moderator@example.com", role="moderator")
+    with psycopg.connect(config.database_url) as conn:
+        conn.execute("ALTER TABLE users DROP CONSTRAINT users_staff_must_be_approved")
+        conn.execute("UPDATE users SET status = 'disabled' WHERE id = %s", (moderator.user_id,))
+
+    with psycopg.connect(config.database_url) as conn:
+        ensure_schema(conn)  # 不會丟例外
+    assert any("版主或管理員不是已審核" in record.getMessage() for record in caplog.records)
+    with psycopg.connect(config.database_url) as conn:
+        validated = conn.execute(
+            "SELECT convalidated FROM pg_constraint WHERE conname = 'users_staff_must_be_approved'"
+        ).fetchone()[0]
+        assert validated is False  # 限制加上了，只是既有的資料還沒檢查通過
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO users (email, display_name, role, status) VALUES ('x@example.com', 'x', 'admin', 'pending')"
+            )

@@ -59,6 +59,11 @@ def delete(conn, token: str) -> None:
     conn.execute("DELETE FROM sessions WHERE token_hash = %s", (_hash(token),))
 
 
+def delete_for_email(conn, email: str) -> int:
+    """作廢一個帳號所有的憑證（等於讓他在每一台裝置上都登出），回傳作廢了幾張。"""
+    return conn.execute("DELETE FROM sessions WHERE email = %s", (email,)).rowcount
+
+
 def trim(conn, email: str, keep: int) -> None:
     """一個帳號只留最近用過的 keep 張憑證，其餘的作廢。登入時呼叫。
 

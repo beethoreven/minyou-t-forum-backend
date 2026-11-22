@@ -1,3 +1,3 @@
-# 開發與測試才需要的套件。版本規則同 requirements.txt（2026-11-18 查 PyPI）。
+# 開發與測試才需要的套件。版本規則同 requirements.txt（2026-11-21 查 PyPI）。
 -r requirements.txt
 pytest==9.2.0

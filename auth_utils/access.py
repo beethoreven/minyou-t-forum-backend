@@ -86,6 +86,12 @@ def require_owner_or_staff(user: dict, author_id: int) -> None:
         raise ApiError(403, "forbidden", "只有作者本人、版主或管理員可以這麼做")
 
 
+def check_can_touch(actor: dict, target: dict) -> None:
+    """版主不能動管理員的帳號。改帳號、讓他登出所有裝置之前都要先過這一關。"""
+    if actor["role"] != "admin" and target["role"] == "admin":
+        raise ApiError(403, "cannot_change_admin", "版主不能修改管理員的帳號")
+
+
 def check_can_manage(actor: dict, target: dict, new_role: str, new_status: str) -> None:
     """後台改一個帳號之前的檢查。actor 是操作的人，target 是被改的帳號。"""
     role_changed = new_role != target["role"]
@@ -96,11 +102,9 @@ def check_can_manage(actor: dict, target: dict, new_role: str, new_status: str) 
         raise ApiError(403, "cannot_change_self", "不能改自己的角色或狀態")
 
     # 版主不能動管理員：不能改管理員的帳號，也不能把別人變成管理員。
-    if actor["role"] != "admin":
-        if target["role"] == "admin":
-            raise ApiError(403, "cannot_change_admin", "版主不能修改管理員的帳號")
-        if new_role == "admin":
-            raise ApiError(403, "cannot_grant_admin", "只有管理員可以指定管理員")
+    check_can_touch(actor, target)
+    if actor["role"] != "admin" and new_role == "admin":
+        raise ApiError(403, "cannot_grant_admin", "只有管理員可以指定管理員")
 
     if status_changed and new_status == "pending":
         raise ApiError(400, "status_invalid", "不能把帳號改回審核中")

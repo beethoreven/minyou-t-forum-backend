@@ -5,7 +5,7 @@ import psycopg
 PAGE_SIZE = 20
 
 _LIST_QUERY = """
-    SELECT p.id, p.title, p.created_at, u.display_name AS author_name,
+    SELECT p.id, p.title, p.created_at, u.display_name AS author_name, u.role AS author_role,
            (SELECT count(*) FROM replies r WHERE r.post_id = p.id) AS reply_count
     FROM posts p JOIN users u ON u.id = p.author_id
 """
@@ -32,8 +32,8 @@ def list_page(conn, before: int | None) -> tuple[list[dict], bool]:
 def get(conn, post_id: int) -> dict | None:
     return conn.execute(
         """
-        SELECT p.id, p.title, p.body, p.created_at, p.updated_at,
-               p.author_id, u.display_name AS author_name
+        SELECT p.id, p.title, p.body, p.created_at, p.updated_at, p.version,
+               p.author_id, u.display_name AS author_name, u.role AS author_role
         FROM posts p JOIN users u ON u.id = p.author_id
         WHERE p.id = %s
         """,
@@ -49,11 +49,16 @@ def create(conn, title: str, body: str, author_id: int) -> int:
     return row["id"]
 
 
-def update(conn, post_id: int, title: str, body: str) -> bool:
-    """回傳有沒有改到（False 代表沒有這篇文章）。"""
+def update(conn, post_id: int, title: str, body: str, version: int) -> bool:
+    """改文章。version 是編輯的人打開時看到的版本號；這段期間被別人改過（版本號對不上）、
+    或文章已經不在了，都不會改到，回傳 False。"""
     cursor = conn.execute(
-        "UPDATE posts SET title = %s, body = %s, updated_at = now() WHERE id = %s",
-        (title, body, post_id),
+        """
+        UPDATE posts
+        SET title = %s, body = %s, updated_at = now(), version = version + 1
+        WHERE id = %s AND version = %s
+        """,
+        (title, body, post_id, version),
     )
     return cursor.rowcount == 1
 
@@ -118,7 +123,7 @@ def list_replies(conn, post_id: int) -> list[dict]:
     """一篇文章的全部回覆，舊的在前面。"""
     return conn.execute(
         """
-        SELECT r.id, r.body, r.created_at, r.author_id, u.display_name AS author_name
+        SELECT r.id, r.body, r.created_at, r.author_id, u.display_name AS author_name, u.role AS author_role
         FROM replies r JOIN users u ON u.id = r.author_id
         WHERE r.post_id = %s
         ORDER BY r.id
@@ -130,7 +135,7 @@ def list_replies(conn, post_id: int) -> list[dict]:
 def get_reply(conn, reply_id: int) -> dict | None:
     return conn.execute(
         """
-        SELECT r.id, r.body, r.created_at, r.author_id, u.display_name AS author_name
+        SELECT r.id, r.body, r.created_at, r.author_id, u.display_name AS author_name, u.role AS author_role
         FROM replies r JOIN users u ON u.id = r.author_id
         WHERE r.id = %s
         """,

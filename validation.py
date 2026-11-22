@@ -11,6 +11,7 @@ import unicodedata
 from flask import Request
 
 from errors import ApiError
+from imaging import ImageRejected, clean_jpeg
 
 # 一則公告、一篇文章最多幾張附圖、一張最大多少。web 會先把圖片縮到 480P 再送，通常只有
 # 幾十 KB；這裡的上限是用來擋不照規矩來的請求。
@@ -67,7 +68,10 @@ def choice_field(data: dict, key: str, label: str, choices: tuple[str, ...]) -> 
 
 
 def images_field(data: dict) -> list[bytes]:
-    """讀公告或文章的附圖：[{"data": "<base64 編碼的 JPEG>"}, …]。沒有附圖回傳空的清單。"""
+    """讀公告或文章的附圖：[{"data": "<base64 編碼的 JPEG>"}, …]。沒有附圖回傳空的清單。
+
+    回傳的是重新存過一次的 JPEG（見 imaging.py），不是瀏覽器送來的原始內容。
+    """
     raw = data.get("images")
     if raw is None:
         return []
@@ -94,8 +98,39 @@ def images_field(data: dict) -> list[bytes]:
         # 只收 JPEG。檔頭對不上的一律不收，免得有人把別種檔案當成圖片塞進來。
         if not content.startswith(JPEG_SIGNATURE):
             raise ApiError(400, "image_not_jpeg", "附圖必須是 JPEG 圖片")
-        images.append(content)
+        try:
+            images.append(clean_jpeg(content, MAX_IMAGE_BYTES))
+        except ImageRejected as rejected:
+            raise ApiError(400, rejected.code, rejected.message) from None
     return images
+
+
+def version_field(data: dict) -> int | None:
+    """讀編輯時帶來的版本號（打開編輯頁時看到的那一版）。沒帶回傳 None，格式不對就是 400。"""
+    value = data.get("version")
+    if value is None:
+        return None
+    # bool 也是 int 的一種，要另外擋掉。
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_ID:
+        raise ApiError(400, "version_invalid", "版本號的格式不正確")
+    return value
+
+
+MEMBER_FIELDS = ("display_name", "unit_no", "role", "status")
+
+
+def expected_member(data: dict) -> dict | None:
+    """讀後台改帳號時帶來的「改之前的樣子」：畫面上載入時的名稱、戶號、角色、狀態。
+
+    沒帶回傳 None（舊版的畫面）；帶了但格式不對是 400。
+    """
+    value = data.get("expected")
+    if value is None:
+        return None
+    is_valid = isinstance(value, dict) and all(isinstance(value.get(key), str) for key in MEMBER_FIELDS)
+    if not is_valid:
+        raise ApiError(400, "expected_invalid", "改之前的資料格式不正確")
+    return {key: value[key] for key in MEMBER_FIELDS}
 
 
 def uploaded_file(request: Request, max_bytes: int) -> tuple[str, bytes]:

@@ -42,18 +42,29 @@ def register(conn, email: str, display_name: str, unit_no: str) -> dict | None:
 
 
 def ensure_first_admin(conn, email: str, display_name: str) -> None:
-    """設定檔指定的第一位管理員：沒有帳號就建立，有的話確保他是已審核的管理員。
+    """設定檔指定的第一位管理員：只在論壇裡還沒有任何管理員的時候，把他設成已審核的管理員。
 
-    每次他登入都執行一次。這個帳號不經過審核，也不會被別人鎖在外面。
+    他每次登入都會呼叫，但已經有管理員之後就什麼都不做。所以其他管理員停用或降級這個帳號
+    之後，他重新登入也不會自己恢復：這個帳號被盜的時候，別的管理員鎖得住它。
     """
     conn.execute(
         """
         INSERT INTO users (email, display_name, role, status)
-        VALUES (%s, %s, 'admin', 'approved')
+        SELECT %s, %s, 'admin', 'approved'
+        WHERE NOT EXISTS (SELECT 1 FROM users WHERE role = 'admin')
         ON CONFLICT (email) DO UPDATE SET role = 'admin', status = 'approved'
         """,
         (email, display_name or "管理員"),
     )
+
+
+def get_for_update(conn, user_id: int) -> dict | None:
+    """讀一位成員，並鎖住這一筆到交易結束。
+
+    後台改帳號時用：先檢查「能不能改」，再寫入。鎖住之後，這段期間別人改不了這一筆，
+    檢查時看到的就是寫入前最新的內容。
+    """
+    return conn.execute(f"SELECT {_COLUMNS} FROM users WHERE id = %s FOR UPDATE", (user_id,)).fetchone()
 
 
 def update(conn, user_id: int, display_name: str, unit_no: str, role: str, status: str) -> None:

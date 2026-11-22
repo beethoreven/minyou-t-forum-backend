@@ -123,9 +123,37 @@ def add_member(sign_in, client):
         member.user_id = registered.get_json()["user"]["id"]
         approved = client.put(
             f"/admin/users/{member.user_id}",
-            json={"display_name": name, "unit_no": "A-1", "role": role, "status": "approved"},
+            json={
+                "display_name": name,
+                "unit_no": "A-1",
+                "role": role,
+                "status": "approved",
+                "expected": {"display_name": name, "unit_no": "A-1", "role": "member", "status": "pending"},
+            },
         )
         assert approved.status_code == 200, approved.get_json()
         return member
 
     return _add
+
+
+def member_fields(database_url: str, user_id: int) -> dict:
+    """資料庫裡這位成員現在的名稱、戶號、角色、狀態。"""
+    with psycopg.connect(database_url) as conn:
+        row = conn.execute(
+            "SELECT display_name, unit_no, role, status FROM users WHERE id = %s", (user_id,)
+        ).fetchone()
+    return dict(zip(("display_name", "unit_no", "role", "status"), row)) if row else {}
+
+
+@pytest.fixture
+def edit_member(config):
+    """照後台畫面的做法改一位成員：先看他現在的樣子當作 expected，再送出要改的欄位。"""
+
+    def _edit(actor: SignedInClient, user_id: int, **changes):
+        current = member_fields(config.database_url, user_id)
+        fields = {"display_name": "住戶", "unit_no": "A-1", "role": "member", "status": "approved"}
+        payload = (current or fields) | {"expected": current or fields} | changes
+        return actor.put(f"/admin/users/{user_id}", json=payload)
+
+    return _edit

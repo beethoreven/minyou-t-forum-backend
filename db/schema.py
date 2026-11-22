@@ -1,8 +1,15 @@
-"""資料表的定義。服務啟動時執行一次，已經存在的表不會被動到。
+"""資料表的定義。服務啟動時執行一次，可以重複執行。
 
-要改既有的表（加欄位、改型別）不能只改這裡：CREATE TABLE IF NOT EXISTS 遇到已經存在的表
-什麼都不做。那種修改要另外寫 ALTER TABLE 手動執行。
+STATEMENTS 建立還不存在的表；已經存在的表，CREATE TABLE IF NOT EXISTS 什麼都不做。
+既有的表要加欄位或限制時，寫進 MIGRATIONS：每一句都要能重複執行，而且不能因為正式資料庫裡
+已經有的資料而失敗，否則服務會起不來。改型別這類修改還是要另外寫 SQL 手動執行。
 """
+
+import logging
+
+import psycopg
+
+logger = logging.getLogger(__name__)
 
 # 兩個行程同時啟動、一起建表時會互相撞到而失敗。建表前先拿這把鎖，一次只讓一個行程做。
 SCHEMA_LOCK = "minyou-t-forum:schema"
@@ -102,12 +109,63 @@ STATEMENTS = (
         created_at timestamptz NOT NULL DEFAULT now()
     )
     """,
+    # 從後台上傳過的文檔：誰、多大、什麼時候。文檔本身在存放的地方（見 documents/），
+    # 這裡只用來算每個人在一段時間內傳了幾個、多少，限制上傳的量。
+    """
+    CREATE TABLE IF NOT EXISTS document_uploads (
+        id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        user_id    bigint NOT NULL REFERENCES users (id),
+        size_bytes bigint NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS document_uploads_user_idx ON document_uploads (user_id, created_at)",
+)
+
+MIGRATIONS = (
+    # 公告與文章的版本號。每改一次加一；編輯時帶著改之前的版本號，對不上就代表
+    # 在編輯的這段時間裡被別人改過，不能直接蓋掉。
+    "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1",
+    "ALTER TABLE posts ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1",
+    # 版主與管理員一定是已審核的帳號。後端改帳號時本來就會檢查（auth_utils/access.py），
+    # 這裡讓資料庫也擋住，直接改資料庫的人也做不出這種組合。
+    # 先用 NOT VALID 加上：只檢查之後寫入的資料，既有的資料不會讓這一句失敗。
+    # 既有的資料在 ensure_schema 最後另外檢查（VALIDATE）。
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'users_staff_must_be_approved' AND conrelid = 'users'::regclass
+        ) THEN
+            ALTER TABLE users ADD CONSTRAINT users_staff_must_be_approved
+                CHECK (role = 'member' OR status = 'approved') NOT VALID;
+        END IF;
+    END
+    $$
+    """,
 )
 
 
 def ensure_schema(conn) -> None:
-    """建立還不存在的表。可以重複執行。"""
+    """建立還不存在的表、補上新的欄位與限制。可以重複執行。"""
     # 這把鎖在交易結束時自動放開。
     conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (SCHEMA_LOCK,))
-    for statement in STATEMENTS:
+    for statement in STATEMENTS + MIGRATIONS:
         conn.execute(statement)
+    _validate_existing_users(conn)
+
+
+def _validate_existing_users(conn) -> None:
+    """確認既有的成員都符合「版主與管理員一定是已審核」。
+
+    符合的話，這個限制就連既有的資料也算數。不符合不擋啟動：寫 log 說明，之後的寫入照樣會被擋，
+    既有的那幾筆要有人看過再決定怎麼改。已經檢查過的，再執行一次幾乎不花時間。
+    """
+    try:
+        with conn.transaction():
+            conn.execute("ALTER TABLE users VALIDATE CONSTRAINT users_staff_must_be_approved")
+    except psycopg.errors.CheckViolation:
+        logger.warning(
+            "users 表裡有版主或管理員不是已審核的帳號；之後的寫入會被擋，既有的資料請手動修正"
+        )
