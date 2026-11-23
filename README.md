@@ -17,7 +17,7 @@
 
 一個給社區住戶用的小論壇，規模以一百人左右為準。住戶用 Google 帳號登入，註冊後要經過審核才能使用。功能刻意保持精簡：公告、文章與回覆（都可以附圖）、文件下載，以及新增公告、上傳文件、管理成員的後台。
 
-這支 repo 是後端，用 Flask 寫，資料存在 PostgreSQL。前端在另一支 repo [`minyou-t-forum-web`](https://github.com/beethoreven/minyou-t-forum-web)，兩者只透過這裡的 JSON API 溝通。
+這支 repo 是後端，用 Flask 寫，資料存在 PostgreSQL。前端在另一支 repo [`minyou-t-forum-web`](https://github.com/minyou-t-forum/minyou-t-forum-web)，兩者只透過這裡的 JSON API 溝通。
 
 ### 系統架構
 
@@ -298,7 +298,7 @@ cp .env.example .env
 .venv/bin/python app.py
 ```
 
-服務在 `http://localhost:5180`。資料表會在啟動時自動建好。用瀏覽器打開 `http://localhost:5180/health`，看到 `{"status":"ok","version":"…"}` 就是起來了。接著照 [`minyou-t-forum-web`](https://github.com/beethoreven/minyou-t-forum-web) 的說明啟動前端。
+服務在 `http://localhost:5180`。資料表會在啟動時自動建好。用瀏覽器打開 `http://localhost:5180/health`，看到 `{"status":"ok","version":"…"}` 就是起來了。接著照 [`minyou-t-forum-web`](https://github.com/minyou-t-forum/minyou-t-forum-web) 的說明啟動前端。
 
 ### 6. 跑測試
 
@@ -427,7 +427,7 @@ The two parts are deliberately separate; don't cross-read them. The report is ba
 
 A small forum for the residents of one community, sized for about a hundred people. Residents sign in with a Google account and must be reviewed after registering before they can use it. The feature set is deliberately small: announcements, posts and replies (both can carry pictures), document downloads, and an admin page for adding announcements, uploading documents and managing members.
 
-This repo is the backend, written with Flask and storing data in PostgreSQL. The frontend lives in a separate repo, [`minyou-t-forum-web`](https://github.com/beethoreven/minyou-t-forum-web); the two talk only through the JSON API here.
+This repo is the backend, written with Flask and storing data in PostgreSQL. The frontend lives in a separate repo, [`minyou-t-forum-web`](https://github.com/minyou-t-forum/minyou-t-forum-web); the two talk only through the JSON API here.
 
 ### System Architecture
 
@@ -708,7 +708,7 @@ Open `.env` and fill in two values; the defaults are fine for the rest:
 .venv/bin/python app.py
 ```
 
-The service runs at `http://localhost:5180`. Tables are created automatically on start-up. Open `http://localhost:5180/health` in a browser; `{"status":"ok","version":"…"}` means it is up. Then follow [`minyou-t-forum-web`](https://github.com/beethoreven/minyou-t-forum-web) to start the frontend.
+The service runs at `http://localhost:5180`. Tables are created automatically on start-up. Open `http://localhost:5180/health` in a browser; `{"status":"ok","version":"…"}` means it is up. Then follow [`minyou-t-forum-web`](https://github.com/minyou-t-forum/minyou-t-forum-web) to start the frontend.
 
 ### 6. Run the Tests
 
