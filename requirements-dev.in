@@ -1,0 +1,5 @@
+# 開發與測試才需要的套件。版本規則同 requirements.in（2026-11-25 查 PyPI）。
+# 產生 requirements-dev.txt（以 requirements.txt 為準，正式環境有的套件版本不會不一樣）：
+#   uv pip compile requirements-dev.in --universal --python-version 3.15 --generate-hashes -c requirements.txt -o requirements-dev.txt
+-r requirements.in
+pytest==9.2.0
