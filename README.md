@@ -225,6 +225,7 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | `errors.py` | 錯誤的統一格式：`{"error": 訊息, "code": 代碼}` |
 | `validation.py` | 輸入檢查 |
 | `imaging.py` | 附圖在伺服器重新存檔：轉正、去掉中繼資料、擋掉尺寸太大的圖 |
+| `timeutil.py` | 時間的格式：API 一律回 UTC 的 ISO 8601 |
 | `auth_utils/google_auth.py` | 驗證 Google 的 ID Token |
 | `auth_utils/sessions.py` | 論壇自己的登入憑證 |
 | `auth_utils/access.py` | 權限規則 |
@@ -635,6 +636,7 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 | `errors.py` | The uniform error format: `{"error": message, "code": code}` |
 | `validation.py` | Input checks |
 | `imaging.py` | Re-saving pictures on the server: turning them upright, dropping metadata, refusing oversized dimensions |
+| `timeutil.py` | Time formatting: the API always returns UTC in ISO 8601 |
 | `auth_utils/google_auth.py` | Verifies Google's ID Token |
 | `auth_utils/sessions.py` | The forum's own session tokens |
 | `auth_utils/access.py` | Permission rules |
