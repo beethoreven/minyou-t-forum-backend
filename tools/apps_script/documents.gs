@@ -29,6 +29,16 @@
 // 這裡的長度是用 UTF-16 的單位算的，一個表情符號算 2。
 const MAX_NAME_LENGTH = 200;
 
+// 只收這些副檔名（大小寫不分），跟後端的 DOCUMENT_EXTENSIONS 一樣。後端已經擋過一次；
+// 這裡再擋一次，是為了 SECRET 萬一外洩時，別人也放不進住戶下載後會被直接執行的檔案。
+const ALLOWED_EXTENSIONS = [
+  ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+  ".odt", ".ods", ".odp", ".txt", ".csv", ".jpg", ".jpeg", ".png",
+];
+
+// 等鎖最多幾毫秒。一次上傳通常幾秒內做完。
+const LOCK_WAIT_MS = 30000;
+
 function doPost(e) {
   try {
     return reply(handle(e));
@@ -59,9 +69,24 @@ function handle(e) {
     return { ok: false, error: "folder_unavailable" };
   }
 
-  if (body.action === "upload") return upload(folder, body);
-  if (body.action === "trash") return trash(folder, body);
-  return { ok: false, error: "unknown_action" };
+  if (body.action !== "upload" && body.action !== "trash") return { ok: false, error: "unknown_action" };
+
+  // 一次只做一件事：兩個同名的檔案同時上傳時，都會先看到「還沒有同名的舊檔」，
+  // 結果兩份並存。拿到鎖才動手，後面那一個就看得到前面剛放進去的檔案，會把它換掉。
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(LOCK_WAIT_MS)) return { ok: false, error: "busy" };
+  try {
+    return body.action === "upload" ? upload(folder, body) : trash(folder, body);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hasAllowedExtension(name) {
+  const lower = name.toLowerCase();
+  return ALLOWED_EXTENSIONS.some(function (extension) {
+    return lower.slice(-extension.length) === extension;
+  });
 }
 
 /** 把一個檔案放進資料夾。body：{ name: 檔名, content_type: 檔案類型, data: base64 編碼的內容 } */
@@ -70,6 +95,7 @@ function upload(folder, body) {
   if (!nameOk || typeof body.data !== "string" || typeof body.content_type !== "string") {
     return { ok: false, error: "bad_request" };
   }
+  if (!hasAllowedExtension(body.name)) return { ok: false, error: "file_type_not_allowed" };
 
   // 先記下資料夾裡同名的舊檔案。
   const replaced = [];

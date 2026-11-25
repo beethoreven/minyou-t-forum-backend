@@ -94,8 +94,8 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | 新增、編輯、刪除公告 | | ✓ | ✓ |
 | 編輯、刪除別人的文章與回覆 | | ✓ | ✓ |
 | 後台：上傳、刪除社區文檔 | | ✓ | ✓ |
-| 後台：審核註冊、停用與恢復帳號、設定版主 | | ✓ | ✓ |
-| 修改管理員的帳號、把別人設成管理員 | | | ✓ |
+| 後台：一般使用者的審核註冊、停用與恢復、改名稱與戶號 | | ✓ | ✓ |
+| 改任何人的角色；修改版主與管理員的帳號 | | | ✓ |
 
 後台另外有兩條保護：
 
@@ -169,7 +169,7 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 - 那支指令碼的網址任何人都連得到，所以後端跟它之間用一個只有兩邊知道的密語確認身分，沒有密語的請求一律拒絕。它只會動設定裡那一個資料夾的檔案。
 - 瀏覽器不直接連 Apps Script：密語只放在後端，「是不是版主或管理員」、檔名與大小的檢查也都在後端做。
 - 上傳同名的檔案時，新的確定放進去之後，舊的才丟進垃圾桶。刪除也是丟進垃圾桶。Google Drive 的垃圾桶會留 30 天，刪錯了主人還救得回來。
-- 一個檔案最多 10 MB。檔名保留中文，只拿掉路徑、擋掉隱藏檔與控制字元。不用 Werkzeug 的 `secure_filename`：它只留英數字，中文的檔名會整個被拿掉。
+- 一個檔案最多 10 MB，只收 `validation.py` 的 `DOCUMENT_EXTENSIONS` 列的副檔名（常見的文件與圖片），擋掉住戶下載後可能被直接執行的檔案；Apps Script 也再擋一次。檔名保留中文，只拿掉路徑、擋掉隱藏檔與控制字元。不用 Werkzeug 的 `secure_filename`：它只留英數字，中文的檔名會整個被拿掉。
 - 沒有設定這支指令碼時，文檔照樣讀得到，只是後台不能上傳，會改成請人直接到 Google Drive 的資料夾放檔案。
 - 設定不對的時候（密語對不上、資料夾代號不對、網址或部署方式不對），後台看到的錯誤訊息會寫出該檢查哪一項設定，不用去翻伺服器的 log。訊息裡只有設定的名稱，沒有設定的值。
 
@@ -402,9 +402,9 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `GET /documents`、`GET /documents/<file_id>/download` | 已審核 | 文件清單、下載 |
 | `GET /admin/users` | 版主、管理員 | 成員列表 |
 | `PUT /admin/users/<id>` | 版主、管理員 | 改顯示名稱、戶號、角色、狀態。要帶 `expected`（畫面載入時的四個欄位），對不上回 409 `member_changed`。停用時會作廢他所有的登入憑證 |
-| `DELETE /admin/users/<id>/sessions` | 版主、管理員（版主不能對管理員用） | 讓這個人在所有裝置上登出，回應 `{"revoked": 作廢的張數}` |
-| `GET /admin/documents` | 版主、管理員 | 能不能從後台上傳文檔、一個檔案最大多少 |
-| `POST /admin/documents` | 版主、管理員 | 上傳一份文檔：`multipart/form-data`，欄位名稱 `file`，最多 10 MB。同名的檔案會被取代 |
+| `DELETE /admin/users/<id>/sessions` | 版主、管理員（版主只能對一般使用者用） | 讓這個人在所有裝置上登出，回應 `{"revoked": 作廢的張數}` |
+| `GET /admin/documents` | 版主、管理員 | 能不能從後台上傳文檔、一個檔案最大多少、收哪些副檔名 |
+| `POST /admin/documents` | 版主、管理員 | 上傳一份文檔：`multipart/form-data`，欄位名稱 `file`，最多 10 MB，只收常見的文件與圖片（pdf、Office、OpenDocument、txt、csv、jpg、png）。同名的檔案會被取代 |
 | `DELETE /admin/documents/<file_id>` | 版主、管理員 | 刪除一份文檔 |
 
 ---
@@ -505,8 +505,8 @@ Permissions nest: administrator ⊃ moderator ⊃ regular user.
 | Create, edit and delete announcements | | ✓ | ✓ |
 | Edit and delete other people's posts and replies | | ✓ | ✓ |
 | Admin page: upload and delete community documents | | ✓ | ✓ |
-| Admin page: review registrations, disable and restore accounts, appoint moderators | | ✓ | ✓ |
-| Change an administrator's account; make someone an administrator | | | ✓ |
+| Admin page: review regular users' registrations, disable and restore them, change their name and unit number | | ✓ | ✓ |
+| Change anyone's role; change a moderator's or administrator's account | | | ✓ |
 
 The admin page has two more safeguards:
 
@@ -580,7 +580,7 @@ Browser ──(form upload, with the session token)──▶ Backend ──(JSON
 - Anyone can reach the script's URL, so the backend and the script recognise each other by a secret only the two of them know, and a request without it is refused. The script touches only the files in the one configured folder.
 - The browser never talks to the Apps Script directly: the secret lives only on the backend, and the checks — is this a moderator or administrator, is the file name and size acceptable — are all done there.
 - When a file with the same name is uploaded, the old one goes to the trash only after the new one is safely in place. Deleting also moves the file to the trash. Google Drive keeps the trash for 30 days, so the owner can still recover a mistaken delete.
-- One file may be at most 10 MB. File names keep their Chinese characters; only the path is dropped, and hidden files and control characters are refused. Werkzeug's `secure_filename` isn't used: it keeps ASCII letters and digits only, so a Chinese file name would be stripped away entirely.
+- One file may be at most 10 MB, and only the extensions listed in `DOCUMENT_EXTENSIONS` in `validation.py` (common documents and images) are accepted, which keeps out files a resident might run straight after downloading; the Apps Script checks again. File names keep their Chinese characters; only the path is dropped, and hidden files and control characters are refused. Werkzeug's `secure_filename` isn't used: it keeps ASCII letters and digits only, so a Chinese file name would be stripped away entirely.
 - Without the script configured, documents can still be read; the admin page just can't upload, and instead asks people to put files into the Google Drive folder directly.
 - When a setting is wrong (the secret doesn't match, the folder id is wrong, the URL or the deployment is wrong), the error message shown on the admin page says which setting to check, so nobody has to dig through the server log. The message names settings and never includes their values.
 
@@ -813,7 +813,7 @@ Errors are always `{"error": "message for people", "code": "code"}`.
 | `GET /documents`, `GET /documents/<file_id>/download` | Approved | The document list; download |
 | `GET /admin/users` | Moderator, administrator | The member list |
 | `PUT /admin/users/<id>` | Moderator, administrator | Change display name, unit number, role and status. Carries `expected` (the four fields as the page loaded them); a mismatch answers 409 `member_changed`. Disabling invalidates all of the person's session tokens |
-| `DELETE /admin/users/<id>/sessions` | Moderator, administrator (moderators can't use it on administrators) | Signs the person out of every device; answers `{"revoked": number of tokens invalidated}` |
-| `GET /admin/documents` | Moderator, administrator | Whether the admin page can upload documents, and the size limit per file |
-| `POST /admin/documents` | Moderator, administrator | Upload a document: `multipart/form-data`, field name `file`, at most 10 MB. A file with the same name is replaced |
+| `DELETE /admin/users/<id>/sessions` | Moderator, administrator (moderators can use it on regular users only) | Signs the person out of every device; answers `{"revoked": number of tokens invalidated}` |
+| `GET /admin/documents` | Moderator, administrator | Whether the admin page can upload documents, the size limit per file, and the accepted file extensions |
+| `POST /admin/documents` | Moderator, administrator | Upload a document: `multipart/form-data`, field name `file`, at most 10 MB, common documents and images only (pdf, Office, OpenDocument, txt, csv, jpg, png). A file with the same name is replaced |
 | `DELETE /admin/documents/<file_id>` | Moderator, administrator | Delete a document |

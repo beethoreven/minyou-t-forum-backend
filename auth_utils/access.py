@@ -13,8 +13,8 @@
 角色有三種，權限一層包一層：管理員 ⊃ 版主 ⊃ 一般使用者。
 
     一般使用者  看公告、看文章、發文章、回覆、下載文件，改或刪自己寫的東西
-    版主        再加上：發公告、改或刪任何人的東西、使用後台管理帳號（管理員的帳號除外）
-    管理員      全部都能做，包含指定誰是管理員
+    版主        再加上：發公告、改或刪任何人的東西、在後台審核、停用一般使用者
+    管理員      全部都能做，包含改任何人的角色、管理版主的帳號
 """
 
 from dataclasses import dataclass
@@ -87,9 +87,17 @@ def require_owner_or_staff(user: dict, author_id: int) -> None:
 
 
 def check_can_touch(actor: dict, target: dict) -> None:
-    """版主不能動管理員的帳號。改帳號、讓他登出所有裝置之前都要先過這一關。"""
-    if actor["role"] != "admin" and target["role"] == "admin":
+    """版主只能管一般使用者的帳號：管理員與其他版主的帳號只有管理員能動。
+
+    改帳號、讓他登出所有裝置之前都要先過這一關。自己的帳號不在此限（但不能改自己的角色與狀態，
+    見 check_can_manage）。
+    """
+    if actor["role"] == "admin" or actor["id"] == target["id"]:
+        return
+    if target["role"] == "admin":
         raise ApiError(403, "cannot_change_admin", "版主不能修改管理員的帳號")
+    if target["role"] == "moderator":
+        raise ApiError(403, "cannot_change_moderator", "版主不能修改其他版主的帳號")
 
 
 def check_can_manage(actor: dict, target: dict, new_role: str, new_status: str) -> None:
@@ -101,10 +109,10 @@ def check_can_manage(actor: dict, target: dict, new_role: str, new_status: str) 
     if actor["id"] == target["id"] and (role_changed or status_changed):
         raise ApiError(403, "cannot_change_self", "不能改自己的角色或狀態")
 
-    # 版主不能動管理員：不能改管理員的帳號，也不能把別人變成管理員。
+    # 版主只能動一般使用者，而且角色只有管理員能改：版主不能把人升成版主或管理員。
     check_can_touch(actor, target)
-    if actor["role"] != "admin" and new_role == "admin":
-        raise ApiError(403, "cannot_grant_admin", "只有管理員可以指定管理員")
+    if actor["role"] != "admin" and role_changed:
+        raise ApiError(403, "cannot_change_role", "只有管理員可以改角色")
 
     if status_changed and new_status == "pending":
         raise ApiError(400, "status_invalid", "不能把帳號改回審核中")

@@ -127,7 +127,10 @@ def test_unreadable_folder_is_503(client, documents_dir):
 
 def test_admin_page_is_told_whether_it_can_upload(client):
     info = client.get("/admin/documents").get_json()
-    assert info == {"can_upload": True, "max_bytes": 10 * 1024 * 1024, "manage_url": None}
+    assert info["can_upload"] is True
+    assert info["max_bytes"] == 10 * 1024 * 1024
+    assert info["manage_url"] is None
+    assert ".pdf" in info["extensions"] and ".exe" not in info["extensions"]
 
 
 def test_upload_then_download(client, documents_dir):
@@ -223,6 +226,15 @@ def test_upload_without_a_file(client):
     ):
         assert response.status_code == 400
         assert response.get_json()["code"] == "file_required"
+
+
+def test_upload_only_accepts_document_types(client, documents_dir):
+    for name in ("安裝程式.exe", "網頁.html", "指令.js", "沒有副檔名"):
+        response = upload(client, name)
+        assert response.status_code == 400
+        assert response.get_json()["code"] == "file_type_not_allowed"
+        assert not (documents_dir / name).exists()
+    assert upload(client, "照片.JPG").status_code == 201  # 大小寫不分
 
 
 def test_upload_size_limit(client, documents_dir, monkeypatch):

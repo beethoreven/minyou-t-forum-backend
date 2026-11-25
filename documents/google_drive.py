@@ -47,6 +47,7 @@ SCRIPT_HINTS = {
         "Apps Script 打不開文檔的資料夾：請確認指令碼屬性 FOLDER_ID 填的是那個資料夾的代號，"
         "而且部署 Apps Script 的帳號可以編輯那個資料夾"
     ),
+    "busy": "同時有其他檔案正在上傳或刪除，請等一下再試一次",
 }
 SCRIPT_UNREADABLE_HINT = (
     "Apps Script 沒有照約定的格式回應：請確認 APPS_SCRIPT_URL 是部署後的網址（結尾是 /exec），"

@@ -22,6 +22,13 @@ JPEG_SIGNATURE = b"\xff\xd8\xff"
 # 上傳的文檔，檔名最多幾個字。
 FILE_NAME_MAX = 100
 
+# 上傳的文檔只收這些副檔名：社區公告、表單、會議紀錄常用的文件與圖片。
+# 擋掉的是住戶下載後可能被直接執行的檔案（.exe、.html、.js 之類）。大小寫不分。
+DOCUMENT_EXTENSIONS = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".odt", ".ods", ".odp", ".txt", ".csv", ".jpg", ".jpeg", ".png",
+)
+
 TITLE_MAX = 100
 BODY_MAX = 10_000
 REPLY_MAX = 2_000
@@ -142,6 +149,9 @@ def uploaded_file(request: Request, max_bytes: int) -> tuple[str, bytes]:
     if file is None or not file.filename:
         raise ApiError(400, "file_required", "請選擇要上傳的檔案")
     name = _file_name(file.filename)
+    if not name.lower().endswith(DOCUMENT_EXTENSIONS):
+        allowed = "、".join(ext.removeprefix(".") for ext in DOCUMENT_EXTENSIONS)
+        raise ApiError(400, "file_type_not_allowed", f"這種檔案不能上傳，只收 {allowed}")
     # 多讀一個位元組，就分得出「剛好到上限」與「超過上限」，又不用把太大的檔案整個讀進來。
     content = file.read(max_bytes + 1)
     if len(content) > max_bytes:

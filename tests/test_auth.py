@@ -247,30 +247,42 @@ def test_only_the_author_or_staff_can_change_a_post(add_member, client):
     assert client.delete(f"/posts/{post['id']}").status_code == 204
 
 
-def test_moderator_can_announce_and_review_but_not_touch_admins(add_member, sign_in, edit_member, client):
+def test_moderator_can_announce_and_review_but_only_manage_members(add_member, sign_in, edit_member, client):
     moderator = add_member("moderator@example.com", role="moderator")
+    other_moderator = add_member("other-moderator@example.com", role="moderator")
     assert moderator.post("/announcements", json=ENTRY).status_code == 201
 
     applicant = sign_in("applicant@example.com")
     applicant_id = applicant.post("/auth/register", json=PROFILE).get_json()["user"]["id"]
     assert edit_member(moderator, applicant_id, status="approved").status_code == 200
     assert applicant.get("/posts").status_code == 200
-    assert edit_member(moderator, applicant_id, role="moderator").status_code == 200
+    assert edit_member(moderator, applicant_id, display_name="改過的名字").status_code == 200
 
-    # 不能改管理員的帳號，也不能把別人變成管理員，也不能讓管理員登出所有裝置
-    touch_admin = edit_member(moderator, client.user_id, display_name="改名")
-    assert touch_admin.status_code == 403
-    assert code_of(touch_admin) == "cannot_change_admin"
-    grant_admin = edit_member(moderator, applicant_id, role="admin")
-    assert grant_admin.status_code == 403
-    assert code_of(grant_admin) == "cannot_grant_admin"
-    sign_out_admin = moderator.delete(f"/admin/users/{client.user_id}/sessions")
-    assert sign_out_admin.status_code == 403
-    assert code_of(sign_out_admin) == "cannot_change_admin"
+    # 角色只有管理員能改：不能把人升成版主或管理員
+    for role in ("moderator", "admin"):
+        promote = edit_member(moderator, applicant_id, role=role)
+        assert promote.status_code == 403
+        assert code_of(promote) == "cannot_change_role"
+
+    # 管理員與其他版主的帳號都不能動，也不能讓他們登出所有裝置
+    for target, code in ((client, "cannot_change_admin"), (other_moderator, "cannot_change_moderator")):
+        for response in (
+            edit_member(moderator, target.user_id, display_name="改名"),
+            edit_member(moderator, target.user_id, status="disabled"),
+            moderator.delete(f"/admin/users/{target.user_id}/sessions"),
+        ):
+            assert response.status_code == 403
+            assert code_of(response) == code
+    assert edit_member(moderator, other_moderator.user_id, role="member").status_code == 403
     assert client.get("/auth/status").status_code == 200
+    assert other_moderator.get("/auth/status").status_code == 200
+
+    # 版主還是可以停用一般使用者
+    assert edit_member(moderator, applicant_id, status="disabled").status_code == 200
 
     # 管理員可以
-    assert edit_member(client, applicant_id, role="admin").status_code == 200
+    assert edit_member(client, other_moderator.user_id, role="member").status_code == 200
+    assert edit_member(client, applicant_id, status="approved", role="admin").status_code == 200
 
 
 def test_nobody_can_change_their_own_role_or_status(add_member, edit_member, client):

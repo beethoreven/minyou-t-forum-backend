@@ -551,7 +551,7 @@ def create_app(
 
     @app.get("/admin/documents")
     def admin_documents():
-        """後台管理文檔前要知道的事：能不能從後台上傳、一個檔案最大多少。
+        """後台管理文檔前要知道的事：能不能從後台上傳、一個檔案最大多少、收哪些副檔名。
 
         文檔放 Google Drive、卻還沒設定代為存檔的 Apps Script 時不能上傳（can_upload 是 false）。
         這時後台改成請人直接去 Google Drive 的資料夾放檔案，manage_url 就是那個資料夾的網址。
@@ -561,6 +561,7 @@ def create_app(
         return {
             "can_upload": documents.can_upload,
             "max_bytes": MAX_DOCUMENT_BYTES,
+            "extensions": list(validation.DOCUMENT_EXTENSIONS),
             "manage_url": documents.manage_url,
         }
 
