@@ -2,14 +2,18 @@
 
 每個要保護的路由，第一件事都是確認「這個請求是誰發的、他能不能做這件事」：
 member(conn) 要求已審核的成員，staff(conn) 要求版主或管理員。規則在 auth_utils/access.py。
+
+版主與管理員做的事記進管理操作紀錄（db/admin_actions.py）：成功的在同一筆交易裡記，
+被拒絕的由 privileged() 另外記。
 """
 
 import sys
 from collections.abc import Callable
+from contextlib import contextmanager
 from urllib.parse import quote
 
 import psycopg
-from flask import Flask, Response, request
+from flask import Flask, Response, g, request
 from flask_cors import CORS
 from werkzeug.routing import BaseConverter
 
@@ -17,7 +21,7 @@ import validation
 from auth_utils import access, guard, sessions
 from auth_utils.google_auth import GoogleIdentity, VerificationUnavailable, make_verifier
 from config import Config, ConfigError, load_config
-from db import announcements, pictures, posts, uploads, users
+from db import admin_actions, announcements, pictures, posts, uploads, users
 from db.connection import connect
 from db.schema import ensure_schema
 from documents.base import DocumentFile, DocumentsUnavailable
@@ -83,6 +87,7 @@ def create_app(
     def signed_in(conn) -> access.Account:
         """這個請求是誰發的。每個帶登入憑證的請求都會經過這裡，所以順便在這裡算他的請求數。"""
         account = access.current_account(conn, request, config.session_idle_days)
+        g.account = account  # 被拒絕的特權操作要記是誰（privileged）
         # 管理員不限：唯一的管理員如果被擋在外面，就沒有人能處理了。
         is_admin = account.user is not None and account.user["role"] == "admin"
         if not is_admin:
@@ -110,6 +115,38 @@ def create_app(
 
     def staff(conn) -> dict:
         return access.require_staff(signed_in(conn))
+
+    @contextmanager
+    def privileged(action: str, target_id=None):
+        """包住一個特權操作的權限檢查：被拒絕（403）時記進管理操作紀錄，再照樣回 403。
+
+        原本的交易會因為這個錯誤而取消，所以另開一條連線、一筆交易來記。
+        """
+        try:
+            yield
+        except ApiError as error:
+            account = g.get("account")
+            if error.status == 403 and account is not None:
+                actor_id = account.user["id"] if account.user else None
+                with db() as conn:
+                    admin_actions.record_denied(conn, actor_id, account.email, action, target_id)
+            raise
+
+    def member_change_actions(target: dict, new: dict) -> list[str]:
+        """後台改一個帳號，這次改了哪幾種東西。每一種記一筆，紀錄上才看得出是審核、停用還是改角色。"""
+        actions = []
+        if new["status"] != target["status"]:
+            if target["status"] == "pending" and new["status"] == "approved":
+                actions.append("user.approve")
+            elif new["status"] == "disabled":
+                actions.append("user.disable")
+            else:
+                actions.append("user.enable")
+        if new["role"] != target["role"]:
+            actions.append("user.role")
+        if new["display_name"] != target["display_name"] or new["unit_no"] != target["unit_no"]:
+            actions.append("user.profile")
+        return actions
 
     # ── 回應的格式 ──────────────────────────────────────────
 
@@ -367,15 +404,16 @@ def create_app(
     @app.post("/announcements")
     def create_announcement():
         limits = (announcements.count_since, guard.ANNOUNCEMENT_LIMITS, "則公告")
-        with db() as conn:
+        with privileged("announcement.create"), db() as conn:
             author = staff(conn)
             check_writes(conn, author, *limits, lock=False)
         title, body, images = new_entry_input()
         with db() as conn:
             check_writes(conn, author, *limits, lock=True)
-            # 公告、圖片、兩者的對應在同一筆交易裡寫入：要嘛全部成功，要嘛什麼都沒有留下。
+            # 公告、圖片、兩者的對應、操作紀錄在同一筆交易裡寫入：要嘛全部成功，要嘛什麼都沒有留下。
             new_id = announcements.create(conn, title, body, author["id"])
             announcements.add_images(conn, new_id, pictures.save(conn, images))
+            admin_actions.record(conn, author, "announcement.create", new_id)
             return announcement_json(conn, announcements.get(conn, new_id)), 201
 
     @app.get("/announcements/<id:announcement_id>/images/<id:image_id>")
@@ -388,22 +426,24 @@ def create_app(
 
     @app.put("/announcements/<id:announcement_id>")
     def update_announcement(announcement_id: int):
-        with db() as conn:
-            staff(conn)
+        with privileged("announcement.update", announcement_id), db() as conn:
+            actor = staff(conn)
             if announcements.get(conn, announcement_id) is None:
                 raise announcement_not_found()
             title, body, version = entry_input("則公告")
             if not announcements.update(conn, announcement_id, title, body, version):
                 raise edit_conflict("則公告")
+            admin_actions.record(conn, actor, "announcement.update", announcement_id)
             return announcement_json(conn, announcements.get(conn, announcement_id))
 
     @app.delete("/announcements/<id:announcement_id>")
     def delete_announcement(announcement_id: int):
-        with db() as conn:
-            staff(conn)
+        with privileged("announcement.delete", announcement_id), db() as conn:
+            actor = staff(conn)
             images = announcements.list_images(conn, announcement_id)
             if not announcements.delete(conn, announcement_id):
                 raise announcement_not_found()
+            admin_actions.record(conn, actor, "announcement.delete", announcement_id)
             # 「哪一張圖屬於這則公告」的紀錄會跟著公告一起刪除，圖片的內容要自己刪。
             pictures.delete(conn, [image["file_id"] for image in images])
         return "", 204
@@ -468,10 +508,14 @@ def create_app(
             if row is None:
                 raise post_not_found()
             # 先確認他能不能改，再看他送來的內容：沒有權限的人一律是 403。
-            access.require_owner_or_staff(user, row["author_id"])
+            with privileged("post.update", post_id):
+                access.require_owner_or_staff(user, row["author_id"])
             title, body, version = entry_input("篇文章")
             if not posts.update(conn, post_id, title, body, version):
                 raise edit_conflict("篇文章")
+            # 改自己的文章是一般的操作；版主或管理員改別人的才記。
+            if user["id"] != row["author_id"]:
+                admin_actions.record(conn, user, "post.update", post_id)
             return post_json(conn, posts.get(conn, post_id))
 
     @app.delete("/posts/<id:post_id>")
@@ -481,9 +525,12 @@ def create_app(
             row = posts.get(conn, post_id)
             if row is None:
                 raise post_not_found()
-            access.require_owner_or_staff(user, row["author_id"])
+            with privileged("post.delete", post_id):
+                access.require_owner_or_staff(user, row["author_id"])
             images = posts.list_images(conn, post_id)
             posts.delete(conn, post_id)
+            if user["id"] != row["author_id"]:
+                admin_actions.record(conn, user, "post.delete", post_id)
             # 「哪一張圖屬於這篇文章」的紀錄會跟著文章一起刪除，圖片的內容要自己刪。
             pictures.delete(conn, [image["file_id"] for image in images])
         return "", 204
@@ -511,8 +558,11 @@ def create_app(
             row = posts.get_reply(conn, reply_id)
             if row is None:
                 raise ApiError(404, "reply_not_found", "找不到這則回覆，可能已經被刪除")
-            access.require_owner_or_staff(user, row["author_id"])
+            with privileged("reply.delete", reply_id):
+                access.require_owner_or_staff(user, row["author_id"])
             posts.delete_reply(conn, reply_id)
+            if user["id"] != row["author_id"]:
+                admin_actions.record(conn, user, "reply.delete", reply_id)
         return "", 204
 
     # ── 社區文檔：成員都能看、下載 ──────────────────────────
@@ -570,14 +620,14 @@ def create_app(
         """上傳一份文檔。已經有同名的檔案時，新的會取代舊的。"""
         # 要在讀請求的內容之前放寬，放寬的只有這一個請求。
         request.max_content_length = MAX_DOCUMENT_BYTES + UPLOAD_OVERHEAD_BYTES
-        with db() as conn:
+        with privileged("document.upload"), db() as conn:
             uploader = staff(conn)
         if not documents.can_upload:
             raise upload_unavailable()
         name, content = validation.uploaded_file(request, MAX_DOCUMENT_BYTES)
 
-        # 先記下這次上傳（佔一個名額），再去存檔。同一個人同時傳好幾個時，後面的人數得到
-        # 前面已經佔掉的名額。管理員不受限制，但一樣記下來。
+        # 先記下這次上傳（佔一個名額）與操作紀錄，再去存檔。同一個人同時傳好幾個時，後面的人
+        # 數得到前面已經佔掉的名額。管理員不受限制，但一樣記下來。
         with db() as conn:
             check_writes(conn, uploader, uploads.count_since, guard.UPLOAD_LIMITS, "個檔案", lock=True)
             if uploader["role"] != "admin":
@@ -588,6 +638,7 @@ def create_app(
                     "一天",
                 )
             upload_id = uploads.record(conn, uploader["id"], len(content))
+            action_id = admin_actions.record(conn, uploader, "document.upload", name)
 
         # 存檔可能要連到外面的服務、等上好幾秒，所以不在資料庫連線開著的時候做。
         saved = False
@@ -597,22 +648,31 @@ def create_app(
         except DocumentsUnavailable as error:
             raise documents_not_writable(error) from None
         finally:
-            # 不管是哪一種原因沒有存成功，佔掉的名額都還回去。
+            # 不管是哪一種原因沒有存成功，佔掉的名額還回去，操作紀錄也拿掉。
             if not saved:
                 with db() as conn:
                     uploads.forget(conn, upload_id)
+                    admin_actions.forget(conn, action_id)
         return {"name": name}, 201
 
     @app.delete("/admin/documents/<file_id>")
     def delete_document(file_id: str):
-        with db() as conn:
-            staff(conn)
+        with privileged("document.delete", file_id), db() as conn:
+            actor = staff(conn)
         if not documents.can_upload:
             raise upload_unavailable()
+        # 跟上傳一樣：先記下，刪除沒有成功再拿掉。
+        with db() as conn:
+            action_id = admin_actions.record(conn, actor, "document.delete", file_id)
+        deleted = False
         try:
             deleted = documents.delete(file_id)
         except DocumentsUnavailable as error:
             raise documents_not_writable(error) from None
+        finally:
+            if not deleted:
+                with db() as conn:
+                    admin_actions.forget(conn, action_id)
         if not deleted:
             raise document_not_found()
         return "", 204
@@ -635,7 +695,7 @@ def create_app(
 
         回應裡的 changed 說這次有沒有真的改到東西，畫面用它決定要顯示「已儲存」還是「沒有修改」。
         """
-        with db() as conn:
+        with privileged("user.update", user_id), db() as conn:
             actor = staff(conn)
             data = validation.json_object(request)
             new = {
@@ -652,9 +712,12 @@ def create_app(
             if expected is None or any(expected[key] != target[key] for key in validation.MEMBER_FIELDS):
                 raise member_changed()
             access.check_can_manage(actor, target, new["role"], new["status"])
-            changed = any(new[key] != target[key] for key in new)
+            actions = member_change_actions(target, new)
+            changed = bool(actions)
             if changed:
                 users.update(conn, user_id, **new)
+                for action in actions:
+                    admin_actions.record(conn, actor, action, user_id)
             if new["status"] == "disabled" and target["status"] != "disabled":
                 sessions.delete_for_email(conn, target["email"])
             item = users.get(conn, user_id)
@@ -666,14 +729,37 @@ def create_app(
 
         例如他的手機掉了。帳號不會被停用，他重新用 Google 登入就能再用。
         """
-        with db() as conn:
+        with privileged("user.sign_out", user_id), db() as conn:
             actor = staff(conn)
             target = users.get(conn, user_id)
             if target is None:
                 raise ApiError(404, "user_not_found", "找不到這位成員")
             access.check_can_touch(actor, target)
             revoked = sessions.delete_for_email(conn, target["email"])
+            admin_actions.record(conn, actor, "user.sign_out", user_id)
         return {"revoked": revoked}
+
+    @app.get("/admin/actions")
+    def admin_list_actions():
+        """管理操作紀錄，新的在前面、一頁 50 筆。只有管理員看得到（版主看不到別人做了什麼）。"""
+        before = validation.before_param(request.args)
+        with privileged("action_log.view"), db() as conn:
+            access.require_admin(signed_in(conn))
+            rows, has_more = admin_actions.list_page(conn, before)
+        items = [
+            {
+                "id": row["id"],
+                "created_at": iso_utc(row["created_at"]),
+                "actor_id": row["actor_id"],
+                "actor_email": row["actor_email"],
+                "actor_name": row["actor_name"],
+                "action": row["action"],
+                "target_id": row["target_id"],
+                "outcome": row["outcome"],
+            }
+            for row in rows
+        ]
+        return {"items": items, "has_more": has_more}
 
     return app
 

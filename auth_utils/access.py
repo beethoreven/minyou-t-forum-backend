@@ -76,6 +76,14 @@ def require_staff(account: Account) -> dict:
     return user
 
 
+def require_admin(account: Account) -> dict:
+    """只有管理員能做的事，例如看管理操作紀錄。"""
+    user = require_member(account)
+    if user["role"] != "admin":
+        raise ApiError(403, "forbidden", "只有管理員可以看")
+    return user
+
+
 def is_staff(user: dict) -> bool:
     return ROLE_LEVEL[user["role"]] >= ROLE_LEVEL["moderator"]
 

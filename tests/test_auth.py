@@ -47,6 +47,7 @@ def with_expected(config, user_id, update: dict) -> dict:
         ("put", "/admin/users/1"),
         ("delete", "/admin/users/1/sessions"),
         ("get", "/admin/documents"),
+        ("get", "/admin/actions"),
     ],
 )
 def test_every_protected_route_needs_a_session(anonymous, method, path):

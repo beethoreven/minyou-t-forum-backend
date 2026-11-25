@@ -109,6 +109,16 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 
 所以 `PUT /admin/users/<id>` 要帶 `expected`：畫面載入時看到的名稱、戶號、角色、狀態。後端先鎖住那一筆（`SELECT … FOR UPDATE`），跟現在的資料比對，對不上就回 409 `member_changed`，畫面會重新載入清單。鎖住再檢查，也讓「檢查能不能改」與「寫入」之間沒有空檔：版主儲存的同時，管理員剛好把同一個人升成管理員，版主也不能把他改回去。沒帶 `expected` 的是改版前的舊畫面，一樣回 409，請他重新整理。
 
+### 管理操作紀錄
+
+版主與管理員做的事都記進 `admin_actions` 表：發、改、刪公告；改或刪別人的文章、刪別人的回覆；上傳、刪除文檔；審核、停用、恢復、改角色、改名稱或戶號、讓人登出所有裝置。被拒絕的特權操作（例如一般使用者想發公告、版主想停用管理員）也記。管理員在後台看得到，版主看不到。
+
+- 每一筆只有時間、誰（帳號編號與 email）、動作代碼、對象的編號、成功或被拒。不記內文、秘密、登入憑證、IP。
+- 成功的操作跟操作本身寫在同一筆交易裡：公告沒發成功，紀錄也不會留下。上傳與刪除文檔要連到外面的服務，所以是先記下、外面沒做成再拿掉，跟上傳的名額同一種做法。
+- 被拒絕時原本的交易會取消，所以另開一筆交易記（`app.py` 的 `privileged`）。被拒絕的請求誰都送得出來，同一個人、同一種動作一分鐘只記一筆，不然一直送就能把紀錄灌滿。
+- 改自己的文章、管理員刪自己的文章不是特權操作，不記；後台按儲存但什麼都沒改，也不記。
+- 保留 180 天。每次寫入時順便刪掉更舊的，不另外排程。
+
 ### 編輯公告與文章為什麼要帶版本號
 
 公告與文章各有一個版本號（`version`），每改一次加一。編輯時要帶著打開編輯頁時看到的版本號；這段期間被別人改過（例如作者與版主同時在改），版本號對不上，回 409 `edit_conflict`，不會直接蓋掉先存的那一份。畫面上打的字會留著，使用者可以先複製起來再重新整理。
@@ -230,7 +240,7 @@ Google 登入給的 ID Token 效期只有一小時左右。它的用途是證明
 | `auth_utils/sessions.py` | 論壇自己的登入憑證 |
 | `auth_utils/access.py` | 權限規則 |
 | `auth_utils/guard.py` | 防濫用：請求頻率、寫入數量、登入次數、登入憑證數量的限制 |
-| `db/` | 連線、建表與補欄位（`schema.py`）、各資料表的讀寫；附圖的內容在 `pictures.py`，上傳紀錄在 `uploads.py` |
+| `db/` | 連線、建表與補欄位（`schema.py`）、各資料表的讀寫；附圖的內容在 `pictures.py`，上傳紀錄在 `uploads.py`，管理操作紀錄在 `admin_actions.py` |
 | `documents/` | 文件的清單、下載、上傳、刪除：`google_drive.py`、`local_folder.py` |
 | `tools/apps_script/documents.gs` | 代替後端把文檔放進 Google Drive 的 Apps Script |
 | `tools/local_db.sh` | 本機開發用的 PostgreSQL |
@@ -403,6 +413,7 @@ TEST_DATABASE_URL=postgresql://postgres@localhost:5442/minyou_t_forum_test .venv
 | `GET /admin/users` | 版主、管理員 | 成員列表 |
 | `PUT /admin/users/<id>` | 版主、管理員 | 改顯示名稱、戶號、角色、狀態。要帶 `expected`（畫面載入時的四個欄位），對不上回 409 `member_changed`。停用時會作廢他所有的登入憑證 |
 | `DELETE /admin/users/<id>/sessions` | 版主、管理員（版主只能對一般使用者用） | 讓這個人在所有裝置上登出，回應 `{"revoked": 作廢的張數}` |
+| `GET /admin/actions?before=<id>` | 管理員 | 管理操作紀錄，新的在前面、一頁 50 筆。每一筆有 `created_at`、`actor_id`、`actor_email`、`actor_name`、`action`、`target_id`、`outcome`（`ok` 或 `denied`） |
 | `GET /admin/documents` | 版主、管理員 | 能不能從後台上傳文檔、一個檔案最大多少、收哪些副檔名 |
 | `POST /admin/documents` | 版主、管理員 | 上傳一份文檔：`multipart/form-data`，欄位名稱 `file`，最多 10 MB，只收常見的文件與圖片（pdf、Office、OpenDocument、txt、csv、jpg、png）。同名的檔案會被取代 |
 | `DELETE /admin/documents/<file_id>` | 版主、管理員 | 刪除一份文檔 |
@@ -519,6 +530,16 @@ The admin page has two more safeguards:
 Each row on the admin page is the data as of the moment it loaded. With two people on the admin page at once, saving from a stale page would write back over someone else's change, such as setting a just-disabled person back to approved.
 
 So `PUT /admin/users/<id>` carries `expected`: the name, unit number, role and status the page loaded. The backend locks that row first (`SELECT … FOR UPDATE`) and compares; if they differ it answers 409 `member_changed`, and the page reloads the list. Locking before checking also leaves no gap between "may this be changed" and the write: if a moderator saves at the very moment an administrator makes the same person an administrator, the moderator can't change them back. A request without `expected` comes from a page older than this check and also gets 409, asking for a reload.
+
+### Admin Action Log
+
+Everything moderators and administrators do is recorded in the `admin_actions` table: creating, editing and deleting announcements; editing or deleting someone else's post and deleting someone else's reply; uploading and deleting documents; approving, disabling, restoring, changing a role, changing a name or unit number, and signing someone out of every device. Refused privileged operations (a regular user trying to post an announcement, a moderator trying to disable an administrator) are recorded too. Administrators can read the log on the admin page; moderators cannot.
+
+- Each row holds only the time, who (account id and email), an action code, the target's id, and whether it succeeded or was refused. No body text, secrets, session tokens or IP addresses.
+- A successful operation is written in the same transaction as the operation itself: if the announcement isn't created, no log row remains. Uploading and deleting documents call an outside service, so the row is written first and removed if the outside step fails, the same way the upload quota works.
+- A refusal cancels the original transaction, so it is recorded in a separate one (`privileged` in `app.py`). Anyone can send a refused request, so the same person and action are recorded at most once a minute; otherwise repeated requests could flood the log.
+- Editing your own post, or an administrator deleting their own post, is not a privileged operation and isn't recorded; pressing save on the admin page without changing anything isn't recorded either.
+- Rows are kept for 180 days. Older rows are deleted whenever a new row is written, with no separate schedule.
 
 ### Why Editing Announcements and Posts Sends a Version Number
 
@@ -641,7 +662,7 @@ If a required setting is missing, malformed, or wrapped in quotes, the service r
 | `auth_utils/sessions.py` | The forum's own session tokens |
 | `auth_utils/access.py` | Permission rules |
 | `auth_utils/guard.py` | Abuse limits: request rate, write counts, sign-in counts, session token count |
-| `db/` | Connection, table creation and added columns (`schema.py`), and reads and writes per table; picture contents are in `pictures.py`, the upload records in `uploads.py` |
+| `db/` | Connection, table creation and added columns (`schema.py`), and reads and writes per table; picture contents are in `pictures.py`, the upload records in `uploads.py`, the admin action log in `admin_actions.py` |
 | `documents/` | Listing, downloading, uploading and deleting documents: `google_drive.py`, `local_folder.py` |
 | `tools/apps_script/documents.gs` | The Apps Script that puts documents into Google Drive on the backend's behalf |
 | `tools/local_db.sh` | PostgreSQL for local development |
@@ -814,6 +835,7 @@ Errors are always `{"error": "message for people", "code": "code"}`.
 | `GET /admin/users` | Moderator, administrator | The member list |
 | `PUT /admin/users/<id>` | Moderator, administrator | Change display name, unit number, role and status. Carries `expected` (the four fields as the page loaded them); a mismatch answers 409 `member_changed`. Disabling invalidates all of the person's session tokens |
 | `DELETE /admin/users/<id>/sessions` | Moderator, administrator (moderators can use it on regular users only) | Signs the person out of every device; answers `{"revoked": number of tokens invalidated}` |
+| `GET /admin/actions?before=<id>` | Administrator | The admin action log, newest first, 50 per page. Each row has `created_at`, `actor_id`, `actor_email`, `actor_name`, `action`, `target_id` and `outcome` (`ok` or `denied`) |
 | `GET /admin/documents` | Moderator, administrator | Whether the admin page can upload documents, the size limit per file, and the accepted file extensions |
 | `POST /admin/documents` | Moderator, administrator | Upload a document: `multipart/form-data`, field name `file`, at most 10 MB, common documents and images only (pdf, Office, OpenDocument, txt, csv, jpg, png). A file with the same name is replaced |
 | `DELETE /admin/documents/<file_id>` | Moderator, administrator | Delete a document |

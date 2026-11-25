@@ -120,6 +120,23 @@ STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS document_uploads_user_idx ON document_uploads (user_id, created_at)",
+    # 管理操作紀錄：版主與管理員做了什麼、被拒絕的特權操作。只記誰、做了哪一種事、對象、
+    # 成功或被拒，不記內文、秘密、登入憑證、IP。保留 180 天（見 db/admin_actions.py）。
+    #   actor_id：users.id；還沒註冊的人被拒絕時沒有 id，只記 email。
+    #   target_id：對象的編號。文檔的對象是檔名或存放處的檔案代號，所以用 text。
+    #   outcome：ok 成功、denied 被拒絕。
+    """
+    CREATE TABLE IF NOT EXISTS admin_actions (
+        id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        actor_id    bigint,
+        actor_email text NOT NULL,
+        action      text NOT NULL,
+        target_id   text,
+        outcome     text NOT NULL CHECK (outcome IN ('ok', 'denied')),
+        created_at  timestamptz NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS admin_actions_created_at_idx ON admin_actions (created_at)",
 )
 
 MIGRATIONS = (
